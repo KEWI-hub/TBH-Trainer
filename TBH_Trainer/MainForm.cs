@@ -45,6 +45,8 @@ internal sealed class MainForm : Form
     private Button _btnExportCatalog = null!;
     private Button _btnAutoStash = null!;
     private Button _btnSortStash = null!;
+    private Button _btnOrganizeStash = null!;
+    private CheckBox _chkAutoOrganize = null!;
     private Label _lblSpawnStatus = null!;
     private ItemScanBridge? _scanBridge;
     private DateTime _lastSpawnClick = DateTime.MinValue;
@@ -320,7 +322,7 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Stash Item Spawn (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 190);
+        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 226);
         grp6.Controls.Add(new Label
         {
             Text = "Each ItemKey has a fixed rarity in the catalog. Grade picks another row (e.g. 304061 Immortal → Cosmic uses 309161). Export catalog to browse IDs.",
@@ -383,7 +385,19 @@ internal sealed class MainForm : Form
         _btnSortStash.Enabled = false;
         _btnSortStash.Click += OnSortStash;
 
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _btnSortStash, _lblSpawnStatus });
+        // Stash pages by category: 1 soul stones, 2 decorations, 3 engravings, 4 inscriptions,
+        // 5 weapons, 6 armor, 7 accessories (bag Lv90+ gear and those materials are moved in first).
+        _btnOrganizeStash = MakeBtn("Organize Stash (7 pages)", 15, 170, 210);
+        _btnOrganizeStash.Enabled = false;
+        _btnOrganizeStash.Click += OnOrganizeStash;
+        _chkAutoOrganize = new CheckBox
+        {
+            Text = "Organize after opening boxes", Location = new Point(235, 174), AutoSize = true,
+            ForeColor = TextMain, Checked = true
+        };
+        _chkAutoOrganize.CheckedChanged += (_, _) => ApplyCombatToggle(21, _chkAutoOrganize.Checked);
+
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _btnSortStash, _btnOrganizeStash, _chkAutoOrganize, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -817,6 +831,7 @@ internal sealed class MainForm : Form
         _btnExportCatalog.Enabled = enabled;
         _btnAutoStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
         _btnSortStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
+        _btnOrganizeStash.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
     }
 
     private void OnExportCatalog(object? sender, EventArgs e)
@@ -940,6 +955,7 @@ internal sealed class MainForm : Form
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
         if (_chkGodMode.Checked) ApplyCombatToggle(13, true);
         if (_chkAutoOpenBoxes.Checked && _buildProfile.BoxCountRva > 0) ApplyCombatToggle(16, true);
+        if (_chkAutoOrganize.Checked && _buildProfile.SlotMoveRva > 0) ApplyCombatToggle(21, true);
     }
 
     /// <summary>
@@ -1221,6 +1237,29 @@ internal sealed class MainForm : Form
         finally
         {
             _btnAutoStash.Enabled = true;
+        }
+    }
+
+    private void OnOrganizeStash(object? sender, EventArgs e)
+    {
+        if (!EnsureGameApiAllowed("Organize stash")) return;
+        if (!EnsureSpeedReady()) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        _btnOrganizeStash.Enabled = false;
+        try
+        {
+            Log("--- Organize stash: 1 soul stones, 2 decorations, 3 engravings, 4 inscriptions, 5 weapons, 6 armor, 7 accessories ---");
+            string? result = _heroScanBridge.WriteValue(20, 0, 1f, timeoutMs: 190000);
+            Log(result?.Trim() ?? "ERROR: organize timed out.");
+        }
+        finally
+        {
+            _btnOrganizeStash.Enabled = true;
         }
     }
 

@@ -4,12 +4,12 @@ namespace TBH_Trainer;
 
 /// <summary>
 /// Shared-memory channel to the injected TBHHook.dll.
-/// Layout MUST match SharedState in dllmain.cpp (pack=1, 116 bytes).
+/// Layout MUST match SharedState in dllmain.cpp (pack=1, 120 bytes).
 /// </summary>
 internal sealed class TrainerBridge : IDisposable
 {
     private const string MapName = "TBHTrainerShared";
-    private const int    MapSize = 116;
+    private const int    MapSize = 120;
     private const int    Magic   = 0x31484254; // "TBH1"
 
     private const long OffMagic        = 0x00;
@@ -41,6 +41,7 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffRvaBoxCount = 0x68;
     private const long OffTrainerPaused = 0x6C;
     private const long OffRvaStashSortAll = 0x70;
+    private const long OffRvaSlotMove = 0x74;
 
     private MemoryMappedFile?         _mmf;
     private MemoryMappedViewAccessor? _view;
@@ -90,6 +91,7 @@ internal sealed class TrainerBridge : IDisposable
         _view.Write(OffRvaStashCache, api ? profile.StashCacheRva : 0);
         _view.Write(OffRvaBoxCount, api ? profile.BoxCountRva : 0);
         _view.Write(OffRvaStashSortAll, api ? profile.StashSortAllRva : 0);
+        _view.Write(OffRvaSlotMove, api ? profile.SlotMoveRva : 0);
         _view.Write(OffTrainerPaused, 0);   // (re)connected: resume
     }
 

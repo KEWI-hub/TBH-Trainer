@@ -66,6 +66,9 @@ internal sealed class GameBuildProfile
     /// <summary>static void wh.Stash.kcb(): the stash Sort button's handler, sorts every page. 0 = press the UI button instead.</summary>
     public int StashSortAllRva { get; init; }
 
+    /// <summary>rz.ije(MoveRequest, Action&lt;MoveResult&gt;): drag &amp; drop between slots (stash organizer).</summary>
+    public int SlotMoveRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -289,6 +292,7 @@ internal sealed class GameBuildProfile
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
         BoxCountRva   = 0x96D650,   // wh.uy.jig
         StashSortAllRva = 0x9C3180, // wh.Stash.kcb() (no direct callers: bound to the Sort button)
+        SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,
