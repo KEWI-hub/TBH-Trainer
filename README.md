@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.4.5
+**เวอร์ชัน trainer:** v1.4.6
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6 และ **1.2.7** (build 25453330, profile `V127`: RVA ใหม่ layout เหมือน 1.2.6)
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -96,9 +96,14 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 - ต้อง**ปิดเกมก่อนอัปเดต** เพราะ `TBHHook.dll` ถูกล็อกอยู่ในเกม
 - ออกเวอร์ชันใหม่: แก้ `AppInfo.Version` ใน `Updater.cs` ให้ตรงกับ tag (`v<เวอร์ชัน>`) แล้วแนบ zip ที่มี `TBH Trainer.exe` + `TBHHook.dll` ใน Release
 
-ค่าที่ lock อัตโนมัติ: HP 10,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
+ค่าที่ lock อัตโนมัติ: HP 2,000,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v1.4.6
+
+- God mode เติม HP ให้ **hero ทุกตัวในด่าน** ทุก ~33 ms (หาจาก `DamageableType.Hero` เหมือนตีทีเดียวตาย) ไม่ผูกกับช่อง UI กัน hero ตายในดินแดนโรคระบาด Torment
+- HP lock เพิ่มจาก 10,000,000 เป็น **2,000,000,000** (ต่ำกว่า int.MaxValue เผื่อเกมแปลง HP เป็น int)
 
 ## เปลี่ยนแปลงใน v1.4.5
 
