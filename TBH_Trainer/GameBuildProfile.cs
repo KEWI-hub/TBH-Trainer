@@ -63,6 +63,9 @@ internal sealed class GameBuildProfile
     /// <summary>static int wh.uy.jif(EBoxType, EContentType) -> unopened stage boxes (auto open boxes).</summary>
     public int BoxCountRva { get; init; }
 
+    /// <summary>static void wh.Stash.kcb(): the stash Sort button's handler, sorts every page. 0 = press the UI button instead.</summary>
+    public int StashSortAllRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -244,6 +247,7 @@ internal sealed class GameBuildProfile
         SlotActionRva = 0x8E2960,   // SlotInteractionManager.inn(SlotActionResult, rm, SlotActionContext)
         StashCacheRva = 0x9AC0A0,   // wh.Stash.kcd(int) -> StashCache
         BoxCountRva   = 0x957EC0,   // wh.uy.jig(EBoxType, EContentType) -> box count
+        StashSortAllRva = 0x9AB7E0, // wh.Stash.kcb() -> kcc(page) for every page
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,
@@ -284,6 +288,7 @@ internal sealed class GameBuildProfile
         SlotActionRva = 0x8FC720,   // SlotInteractionManager.inn
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
         BoxCountRva   = 0x96D650,   // wh.uy.jig
+        StashSortAllRva = 0x9C3180, // wh.Stash.kcb() (no direct callers: bound to the Sort button)
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,

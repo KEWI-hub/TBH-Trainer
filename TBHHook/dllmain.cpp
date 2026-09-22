@@ -48,14 +48,15 @@ struct SharedState
     int32_t rvaStashCache; // 0x64  static Stash.kcc(int index) -> StashCache (unlock state per slot)
     int32_t rvaBoxCount;   // 0x68  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
     int32_t trainerPaused; // 0x6C  1 = trainer disconnected: stop every call into the game
+    int32_t rvaStashSortAll; // 0x70  static wh.Stash.kcb() -> sorts every stash page (Sort button)
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 112, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 116, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 112;
+static const int      kMapSize = 116;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -265,7 +266,6 @@ static HeroLocks g_heroLocks[3] = {};
 // Shutdown safety: once the game starts closing, the worker thread must stop calling into
 // il2cpp — Unity tears its runtime down underneath us and the next call crashes the game.
 static volatile bool      g_shuttingDown   = false;
-static volatile ULONGLONG g_lastFrameTick  = 0;     // set by the Update detour every frame
 
 // Extra ObscuredFloat stat locks on Unit (commands 8-11). Offsets match the 1.00.09
 // dump and the 1.2.4 hero layout dump (Unit.bdxp / bdxq / bdxr / bdxn).
@@ -2696,9 +2696,33 @@ static void* FindMethodOnHierarchy(void* klass, const char* name, int argc)
     return nullptr;
 }
 
+static bool g_uiClickSortedDirect = false;
+
 static void UiClickStep()
 {
     g_uiClickResult = -1;
+    g_uiClickSortedDirect = false;
+
+    // Stash sort: call the Sort button's own static handler (wh.Stash.kcb on 1.2.7/1.2.8),
+    // which sorts every page and works without the stash window having been opened.
+    static void* s_sortAll = nullptr;
+    if (!s_sortAll && g_shared && g_shared->rvaStashSortAll > 0 && Streq(g_uiClickField, "SortingButton"))
+        s_sortAll = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaStashSortAll), 0, nullptr);
+    if (s_sortAll && Streq(g_uiClickField, "SortingButton"))
+    {
+        void* exc = nullptr;
+        il2cpp_runtime_invoke(s_sortAll, nullptr, nullptr, &exc);
+        if (exc)
+        {
+            strcpy_s(g_uiClickError, "the game's sort threw an exception");
+            g_uiClickResult = -5;
+            return;
+        }
+        g_uiClickSortedDirect = true;
+        g_uiClickResult = 1;
+        return;
+    }
+
     void* panelClass = FindClass(g_domain, "TaskbarHero", g_uiClickClass);
     void* objClass = FindClass(g_domain, "UnityEngine", "Object");
     void* findAll = objClass ? il2cpp_class_get_method_from_name(objClass, "FindObjectsOfType", 2) : nullptr;
@@ -2755,7 +2779,6 @@ static void UiClickStep()
 
 static void HookedSimUpdate(void* self, const void* method)
 {
-    g_lastFrameTick = GetTickCount64();
     bool paused = g_shared && g_shared->trainerPaused;
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
     if (g_uiClickPending && !g_shuttingDown && !paused)
@@ -2819,13 +2842,14 @@ static bool InstallSimUpdateHook()
     uint8_t* tramp = stub + 32;
     memcpy(tramp, kPrologue, sizeof(kPrologue));
     absJmp(tramp + sizeof(kPrologue), target + sizeof(kPrologue));
-    g_origSimUpdate = reinterpret_cast<SimUpdateFn>(tramp);
 
     // Swap the first 8 bytes in one atomic store (the function is 16-byte aligned) so the
-    // main thread never executes a half-written jump.
+    // main thread never executes a half-written jump. g_origSimUpdate is only set once the
+    // patch is in, so a failure here is reported instead of looking "installed".
     if ((reinterpret_cast<uintptr_t>(target) & 7) != 0) return false;
     DWORD old = 0;
     if (!VirtualProtect(target, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    g_origSimUpdate = reinterpret_cast<SimUpdateFn>(tramp);
     uint8_t patch[8];
     memcpy(patch, target, 8);
     int32_t rel = static_cast<int32_t>(stub - (target + 5));
@@ -2900,6 +2924,16 @@ static void InstallShutdownWatch()
     SetWindowsHookExW(WH_GETMESSAGE, ShutdownGetMsgHook, nullptr, mainThread);
 }
 
+// The worker blocks while a main-thread job runs (auto stash up to 30s, UI click up to 5s);
+// keep god mode / hero locks going meanwhile so heroes can't die during the wait.
+static void KeepHeroesAlive()
+{
+    if (g_shuttingDown || (g_shared && g_shared->trainerPaused)) return;
+    if (g_godMode) ApplyGodModeAllHeroes();
+    for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex)
+        ApplyHeroLocks(heroIndex);
+}
+
 // Command 15: move every inventory item with level >= value into the stash (main thread).
 static void RunAutoStash()
 {
@@ -2932,7 +2966,10 @@ static void RunAutoStash()
     InterlockedExchange(&g_stashJobActive, 1);
 
     for (int waited = 0; g_stashJobActive && waited < 30000; waited += 50)
+    {
         Sleep(50);
+        if ((waited % 100) == 0) KeepHeroesAlive();
+    }
     bool timedOut = g_stashJobActive != 0;
     InterlockedExchange(&g_stashJobActive, 0);
 
@@ -2963,16 +3000,21 @@ static void RunHeroCommand()
             g_uiClickClass = "UI_Stash";
             g_uiClickField = "SortingButton";
             g_uiClickError[0] = '\0';
+            g_uiClickResult = 0;   // a timeout must not report the previous click's result
             InterlockedExchange(&g_uiClickPending, 1);
             for (int waited = 0; g_uiClickPending && waited < 5000; waited += 20)
+            {
                 Sleep(20);
+                if ((waited % 100) == 0) KeepHeroesAlive();
+            }
             if (g_uiClickPending)
             {
                 InterlockedExchange(&g_uiClickPending, 0);
                 n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort timed out (game not running frames?).\r\n");
             }
             else if (g_uiClickResult == 1)
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: Stash sort pressed.\r\n");
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, g_uiClickSortedDirect
+                    ? "OK: Stash sorted (all pages).\r\n" : "OK: Stash Sort button pressed.\r\n");
             else
                 n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort - %s.\r\n", g_uiClickError);
         }
@@ -3654,7 +3696,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
 
     bool wasEnabled = false;
     InstallShutdownWatch();
-    InstallSimUpdateHook();   // also provides the per-frame "game alive" signal
+    InstallSimUpdateHook();   // main-thread jobs (auto stash, boxes, UI clicks)
 
     for (;;)
     {
