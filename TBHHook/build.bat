@@ -20,7 +20,7 @@ if not defined VCVARS (
     exit /b 1
 )
 call "%VCVARS%"
-cl /nologo /LD /O2 /EHsc /MT dllmain.cpp /Fe:TBHHook.dll /link kernel32.lib
+cl /nologo /LD /O2 /EHsc /MT dllmain.cpp /Fe:TBHHook.dll /link kernel32.lib user32.lib
 if errorlevel 1 (
     echo BUILD FAILED
     exit /b 1
@@ -29,7 +29,7 @@ goto :done
 
 :mingw
 echo Building with MinGW-w64...
-g++ -shared -O2 -std=c++17 -static -s -o TBHHook.dll dllmain.cpp -lkernel32
+g++ -shared -O2 -std=c++17 -static -s -o TBHHook.dll dllmain.cpp -lkernel32 -luser32
 if errorlevel 1 (
     echo BUILD FAILED
     exit /b 1

@@ -4,12 +4,12 @@ namespace TBH_Trainer;
 
 /// <summary>
 /// Shared-memory channel to the injected TBHHook.dll.
-/// Layout MUST match SharedState in dllmain.cpp (pack=1, 84 bytes).
+/// Layout MUST match SharedState in dllmain.cpp (pack=1, 112 bytes).
 /// </summary>
 internal sealed class TrainerBridge : IDisposable
 {
     private const string MapName = "TBHTrainerShared";
-    private const int    MapSize = 84;
+    private const int    MapSize = 112;
     private const int    Magic   = 0x31484254; // "TBH1"
 
     private const long OffMagic        = 0x00;
@@ -33,6 +33,13 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffRvaSaveCtor  = 0x48;
     private const long OffRvaAddItem   = 0x4C;
     private const long OffRvaItemInfo  = 0x50;
+    private const long OffRvaSlotUid   = 0x54;
+    private const long OffRvaSlotObj   = 0x58;
+    private const long OffRvaSlotCtx   = 0x5C;
+    private const long OffRvaSlotAction = 0x60;
+    private const long OffRvaStashCache = 0x64;
+    private const long OffRvaBoxCount = 0x68;
+    private const long OffTrainerPaused = 0x6C;
 
     private MemoryMappedFile?         _mmf;
     private MemoryMappedViewAccessor? _view;
@@ -75,6 +82,13 @@ internal sealed class TrainerBridge : IDisposable
         _view.Write(OffRvaSaveCtor, api ? profile.StashSaveDataCtor : 0);
         _view.Write(OffRvaAddItem,  api ? profile.ItemAddRva : 0);
         _view.Write(OffRvaItemInfo, api ? profile.ItemInfoRva : 0);
+        _view.Write(OffRvaSlotUid,   api ? profile.SlotUidRva : 0);
+        _view.Write(OffRvaSlotObj,   api ? profile.SlotObjRva : 0);
+        _view.Write(OffRvaSlotCtx,   api ? profile.SlotCtxRva : 0);
+        _view.Write(OffRvaSlotAction, api ? profile.SlotActionRva : 0);
+        _view.Write(OffRvaStashCache, api ? profile.StashCacheRva : 0);
+        _view.Write(OffRvaBoxCount, api ? profile.BoxCountRva : 0);
+        _view.Write(OffTrainerPaused, 0);   // (re)connected: resume
     }
 
     public int  Heartbeat    => _view?.ReadInt32(OffHeartbeat) ?? -1;
@@ -94,6 +108,14 @@ internal sealed class TrainerBridge : IDisposable
             Thread.Sleep(100);
         }
         return StashResolved;
+    }
+
+    /// <summary>Disconnect: the hook restores normal speed and stops all game calls until the next Connect.</summary>
+    public void Pause()
+    {
+        if (_view == null) return;
+        _view.Write(OffSpeedEnabled, 0);
+        _view.Write(OffTrainerPaused, 1);
     }
 
     public void SetSpeed(bool enabled, float timeScale)

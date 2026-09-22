@@ -50,6 +50,14 @@ internal sealed class HeroScanBridge : IDisposable
         return RunRequest(timeoutMs);
     }
 
+    /// <summary>Command 14: read-only inventory listing (level / grade) and stash usage.</summary>
+    public string? RunInventoryScan(int timeoutMs = 15000)
+    {
+        if (_view == null) return null;
+        _view.Write(OffCommand, 14);
+        return RunRequest(timeoutMs);
+    }
+
     public string? WriteValue(int command, int heroIndex, float value, int timeoutMs = 5000)
     {
         if (_view == null) return null;

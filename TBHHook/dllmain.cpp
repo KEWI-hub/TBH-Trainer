@@ -41,14 +41,21 @@ struct SharedState
     int32_t rvaSaveCtor;   // 0x48
     int32_t rvaAddItem;    // 0x4C  ue.ti.blk (1.00.09) / we.va.jiv (1.2.4)
     int32_t rvaItemInfo;   // 0x50  static ItemInfoData lookup(int itemKey), e.g. we.va.jjc (1.2.4)
+    int32_t rvaSlotUid;    // 0x54  rz.ikf(ESlotType, int) -> item uid in that slot (1.2.6)
+    int32_t rvaSlotObj;    // 0x58  rz.ikc(ESlotType, int) -> ItemSlot UI object
+    int32_t rvaSlotCtx;    // 0x5C  SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext
+    int32_t rvaSlotAction; // 0x60  SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext)
+    int32_t rvaStashCache; // 0x64  static Stash.kcc(int index) -> StashCache (unlock state per slot)
+    int32_t rvaBoxCount;   // 0x68  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
+    int32_t trainerPaused; // 0x6C  1 = trainer disconnected: stop every call into the game
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 84, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 112, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 84;
+static const int      kMapSize = 112;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -131,12 +138,16 @@ typedef size_t (*il2cpp_field_get_offset_t)(void* field);
 typedef const void* (*il2cpp_field_get_type_t)(void* field);
 typedef char* (*il2cpp_type_get_name_t)(const void* type);
 typedef void (*il2cpp_free_t)(void* ptr);
+typedef const void* (*il2cpp_class_get_type_t)(void* klass);
+typedef void* (*il2cpp_type_get_object_t)(const void* type);
 
 // Used by the read-only hero layout dump (metadata only, never dereferences objects).
 static il2cpp_field_get_offset_t il2cpp_field_get_offset;
 static il2cpp_field_get_type_t   il2cpp_field_get_type;
 static il2cpp_type_get_name_t    il2cpp_type_get_name;
 static il2cpp_free_t             il2cpp_free;
+static il2cpp_class_get_type_t   il2cpp_class_get_type;
+static il2cpp_type_get_object_t  il2cpp_type_get_object;
 
 static il2cpp_domain_get_t                 il2cpp_domain_get;
 static il2cpp_thread_attach_t              il2cpp_thread_attach;
@@ -220,6 +231,7 @@ static uintptr_t    g_rvaStashJbb       = kDefaultRvaStashJbb;
 static uintptr_t    g_rvaSaveCtor       = kDefaultRvaStashSaveDataCtor;
 static uintptr_t    g_rvaAddItem        = 0;
 static uintptr_t    g_rvaItemInfo       = 0;
+static void*        g_itemApiClass      = nullptr; // class of the add-item method (wh.vc on 1.2.6)
 static int32_t      g_blkArgCount       = 3;   // 3 = blk(int, ulong, bool); 5 = jiv(int, ulong, source, int, bool)
 static int32_t      g_buildId           = 0;
 
@@ -247,6 +259,11 @@ struct HeroLocks
     float extraValue[4];
 };
 static HeroLocks g_heroLocks[3] = {};
+
+// Shutdown safety: once the game starts closing, the worker thread must stop calling into
+// il2cpp — Unity tears its runtime down underneath us and the next call crashes the game.
+static volatile bool      g_shuttingDown   = false;
+static volatile ULONGLONG g_lastFrameTick  = 0;     // set by the Update detour every frame
 
 // Extra ObscuredFloat stat locks on Unit (commands 8-11). Offsets match the 1.00.09
 // dump and the 1.2.4 hero layout dump (Unit.bdxp / bdxq / bdxr / bdxn).
@@ -330,6 +347,8 @@ static bool LoadIl2Cpp()
     il2cpp_field_get_type             = Resolve<il2cpp_field_get_type_t>(g_gameAssembly,              "il2cpp_field_get_type");
     il2cpp_type_get_name              = Resolve<il2cpp_type_get_name_t>(g_gameAssembly,               "il2cpp_type_get_name");
     il2cpp_free                       = Resolve<il2cpp_free_t>(g_gameAssembly,                        "il2cpp_free");
+    il2cpp_class_get_type             = Resolve<il2cpp_class_get_type_t>(g_gameAssembly,              "il2cpp_class_get_type");
+    il2cpp_type_get_object            = Resolve<il2cpp_type_get_object_t>(g_gameAssembly,             "il2cpp_type_get_object");
 
     return il2cpp_domain_get && il2cpp_thread_attach && il2cpp_domain_get_assemblies &&
            il2cpp_assembly_get_image && il2cpp_class_from_name &&
@@ -579,6 +598,7 @@ static bool ResolveItemAdd()
             g_blkMethod = FindMethodByRva(g_rvaAddItem, -1, &klass);
             if (g_blkMethod)
             {
+                g_itemApiClass = klass;
                 g_blkArgCount = il2cpp_method_get_param_count ? il2cpp_method_get_param_count(g_blkMethod) : 3;
                 if (g_blkArgCount != 3 && g_blkArgCount != 5) g_blkMethod = nullptr; // unknown shape
             }
@@ -2192,12 +2212,618 @@ static bool ApplyHeroLocks(int32_t heroIndex)
     return true;
 }
 
+// uid -> item instance: the item API class keeps a static Dictionary<ulong, Item>
+// (wh.vc.bgla on 1.2.6). Found by type so the obfuscated name doesn't matter.
+static void* ItemByUid(uint64_t uid)
+{
+    static void* s_dictField = nullptr;
+    if (!s_dictField)
+    {
+        ResolveItemAdd();
+        if (!g_itemApiClass || !il2cpp_type_get_name) return nullptr;
+        void* iter = nullptr;
+        void* field = nullptr;
+        while ((field = il2cpp_class_get_fields(g_itemApiClass, &iter)) != nullptr)
+        {
+            if (!il2cpp_field_get_flags || (il2cpp_field_get_flags(field) & 0x0010) == 0) continue;
+            char* tn = il2cpp_type_get_name(il2cpp_field_get_type(field));
+            bool match = tn && StrContains(tn, "Dictionary<System.UInt64,");
+            if (tn && il2cpp_free) il2cpp_free(tn);
+            if (match) { s_dictField = field; break; }
+        }
+        if (!s_dictField) return nullptr;
+    }
+    void* dict = nullptr;
+    il2cpp_field_static_get_value(s_dictField, &dict);
+    if (!dict) return nullptr;
+    void* tryGet = il2cpp_class_get_method_from_name(il2cpp_object_get_class(dict), "TryGetValue", 2);
+    if (!tryGet) return nullptr;
+    void* item = nullptr;
+    void* args[2] = { &uid, &item };
+    void* exc = nullptr;
+    il2cpp_runtime_invoke(tryGet, dict, args, &exc);
+    return exc ? nullptr : item;
+}
+
+// rz singleton + its slot-uid getter, resolved from the trainer-published RVA.
+static bool ResolveSlotApi(void** rzInstance, void** uidMethod)
+{
+    static void* s_uid = nullptr;
+    static void* s_rzClass = nullptr;
+    SyncStashRvasFromShared();
+    if (!s_uid && g_shared && g_shared->rvaSlotUid > 0)
+        s_uid = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaSlotUid), 2, &s_rzClass);
+    if (!s_uid || !s_rzClass) return false;
+    void* inst = FindSingletonInstance(s_rzClass);
+    if (!inst) return false;
+    *rzInstance = inst;
+    *uidMethod = s_uid;
+    return true;
+}
+
+static uint64_t SlotUid(void* rz, void* uidMethod, int32_t slotType, int32_t index, bool* failed)
+{
+    void* args[2] = { &slotType, &index };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(uidMethod, rz, args, &exc);
+    if (exc || !boxed) { *failed = true; return 0; }
+    return *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+}
+
+static const int32_t kSlotInventory = 1; // ESlotType.INVENTORY
+static const int32_t kSlotStash     = 2; // ESlotType.STASH
+static const int32_t kMaxInventorySlots = 260; // InventoryInfoData rows
+static const int32_t kMaxStashSlots     = 400;
+
+// Stash slot stats from Stash.kcc(i) -> StashCache -> StashSaveData { ItemUniqueId, IsUnLock }.
+static bool StashSlotStats(int32_t* used, int32_t* unlocked, int32_t* total)
+{
+    static void* s_kcc = nullptr;
+    static void* s_saveField = nullptr;
+    static void* s_uidField = nullptr;
+    static void* s_unlockField = nullptr;
+    if (!s_kcc && g_shared && g_shared->rvaStashCache > 0)
+        s_kcc = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaStashCache), 1, nullptr);
+    if (!s_kcc) return false;
+
+    for (int32_t i = 0; i < kMaxStashSlots; ++i)
+    {
+        int32_t index = i;
+        void* args[1] = { &index };
+        void* exc = nullptr;
+        void* cache = il2cpp_runtime_invoke(s_kcc, nullptr, args, &exc);
+        if (exc || !cache) break;
+        if (!s_saveField)
+        {
+            void* iter = nullptr;
+            void* f = nullptr;
+            while ((f = il2cpp_class_get_fields(il2cpp_object_get_class(cache), &iter)) != nullptr)
+            {
+                char* tn = il2cpp_type_get_name(il2cpp_field_get_type(f));
+                bool match = tn && StrContains(tn, "StashSaveData");
+                if (tn && il2cpp_free) il2cpp_free(tn);
+                if (match) { s_saveField = f; break; }
+            }
+            if (!s_saveField) return false;
+        }
+        void* save = nullptr;
+        il2cpp_field_get_value(cache, s_saveField, &save);
+        if (!save) break;
+        if (!s_unlockField)
+        {
+            void* saveClass = il2cpp_object_get_class(save);
+            s_unlockField = il2cpp_class_get_field_from_name(saveClass, "IsUnLock");
+            s_uidField = il2cpp_class_get_field_from_name(saveClass, "ItemUniqueId");
+            if (!s_unlockField || !s_uidField) return false;
+        }
+        bool isUnlocked = false;
+        uint64_t uid = 0;
+        il2cpp_field_get_value(save, s_unlockField, &isUnlocked);
+        il2cpp_field_get_value(save, s_uidField, &uid);
+        ++*total;
+        if (isUnlocked) ++*unlocked;
+        if (uid) ++*used;
+    }
+    return *total > 0;
+}
+
+// Command 14: read-only listing of inventory items (level / grade / key) and stash usage.
+static void RunInventoryScan()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== Inventory scan (read-only) ===\r\n");
+
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod))
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: slot API not available on this build (enter the game first).\r\n");
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    int32_t items = 0, lv90 = 0;
+    for (int32_t i = 0; i < kMaxInventorySlots; ++i)
+    {
+        bool failed = false;
+        uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, i, &failed);
+        if (failed) break;
+        if (!uid) continue;
+        void* item = ItemByUid(uid);
+        void* info = item ? *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(item) + 0x10) : nullptr;
+        if (!info)
+        {
+            pos = ScanAppend(text, cap, pos, "INV slot=%3d uid=0x%llX (item data not found)\r\n", i, (unsigned long long)uid);
+            continue;
+        }
+        uint8_t* p = reinterpret_cast<uint8_t*>(info);
+        int32_t key = *reinterpret_cast<int32_t*>(p + 0x30);
+        int32_t type = *reinterpret_cast<int32_t*>(p + 0x34);
+        int32_t grade = *reinterpret_cast<int32_t*>(p + 0x38);
+        int32_t level = *reinterpret_cast<int32_t*>(p + 0x6C);
+        ++items;
+        if (level >= 90) ++lv90;
+        pos = ScanAppend(text, cap, pos, "INV slot=%3d key=%d %s grade=%d (%s) lv=%d%s\r\n",
+            i, key, type == 2 ? "GEAR" : type == 1 ? "MATERIAL" : type == 0 ? "BOX" : "?",
+            grade, GradeTypeName(grade), level, level >= 90 ? "  <- move to stash" : "");
+    }
+
+    // Stash size differs per player (slots are unlocked over time): count unlocked slots only.
+    int32_t stashUsed = 0, stashUnlocked = 0, stashTotal = 0;
+    bool unlockKnown = StashSlotStats(&stashUsed, &stashUnlocked, &stashTotal);
+    if (unlockKnown)
+        pos = ScanAppend(text, cap, pos,
+            "\r\nInventory: %d item(s), %d at Lv90+.  Stash: %d/%d unlocked slot(s) used, %d free (%d locked).\r\n",
+            items, lv90, stashUsed, stashUnlocked, stashUnlocked - stashUsed, stashTotal - stashUnlocked);
+    else
+        pos = ScanAppend(text, cap, pos, "\r\nInventory: %d item(s), %d at Lv90+.  Stash: unlock state unavailable.\r\n",
+            items, lv90);
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
+// ---------------------------------------------------------------------------------
+// Main-thread jobs. Moving items touches Unity UI, which only works on the main thread,
+// so SlotInteractionManager.Update (called every frame by Unity) is detoured and runs
+// queued jobs before the original Update.
+// ---------------------------------------------------------------------------------
+
+typedef void (*SimUpdateFn)(void* self, const void* method);
+static SimUpdateFn   g_origSimUpdate   = nullptr;
+static bool          g_simHookTried    = false;
+
+// Auto-stash job state (worker thread queues, main thread executes).
+static volatile LONG g_stashJobActive  = 0;
+static int32_t       g_stashJobMinLevel = 90;
+static int32_t       g_stashJobIndex   = 0;
+static int32_t       g_stashJobMoved   = 0;
+static int32_t       g_stashJobFailed  = 0;
+static int32_t       g_stashJobFrame   = 0;
+static char          g_stashJobError[128] = {};
+
+struct SlotActionResultNative   // TaskbarHero.SlotActionResult
+{
+    int32_t destinationSlotType;
+    int32_t action;
+    bool    allowTabSwitch;
+};
+
+static const int32_t kActionMoveToStash = 4; // ESlotAction.MoveToStash
+
+static void* MethodFromSharedRva(int32_t rva, int argCount)
+{
+    return rva > 0 ? FindMethodByRva(static_cast<uintptr_t>(rva), argCount, nullptr) : nullptr;
+}
+
+// One Lv>=N inventory item per call: rz.ikc -> ItemSlot, SlotInteractionManager.inj ->
+// context, then inm with Destination = STASH / Action = MoveToStash — the same calls the
+// game makes when the player moves a slot. Returns false when the scan is finished.
+static bool StashJobStep(void* sim)
+{
+    static void* s_slotObj = nullptr;
+    static void* s_ctx = nullptr;
+    static void* s_action = nullptr;
+    if (!s_slotObj) s_slotObj = MethodFromSharedRva(g_shared ? g_shared->rvaSlotObj : 0, 2);
+    if (!s_ctx)     s_ctx     = MethodFromSharedRva(g_shared ? g_shared->rvaSlotCtx : 0, 3);
+    if (!s_action)  s_action  = MethodFromSharedRva(g_shared ? g_shared->rvaSlotAction : 0, 3);
+
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!s_slotObj || !s_ctx || !s_action || !ResolveSlotApi(&rz, &uidMethod))
+    {
+        strcpy_s(g_stashJobError, "slot API not resolved on this build");
+        return false;
+    }
+
+    for (; g_stashJobIndex < kMaxInventorySlots; ++g_stashJobIndex)
+    {
+        int32_t index = g_stashJobIndex;
+        bool failed = false;
+        uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, index, &failed);
+        if (failed) return false;          // past the last inventory slot
+        if (!uid) continue;
+
+        void* item = ItemByUid(uid);
+        void* info = item ? *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(item) + 0x10) : nullptr;
+        if (!info) continue;
+        int32_t level = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(info) + 0x6C);
+        if (level < g_stashJobMinLevel) continue;
+
+        int32_t slotType = kSlotInventory;
+        void* exc = nullptr;
+        void* argsSlot[2] = { &slotType, &index };
+        void* slot = il2cpp_runtime_invoke(s_slotObj, rz, argsSlot, &exc);
+        if (exc || !slot)
+        {
+            ++g_stashJobFailed;
+            strcpy_s(g_stashJobError, "inventory slot UI not found (open the HERO bag)");
+            ++g_stashJobIndex;
+            return true;
+        }
+
+        bool flag = false;
+        void* argsCtx[3] = { slot, &flag, &uid };
+        exc = nullptr;
+        void* ctxBoxed = il2cpp_runtime_invoke(s_ctx, sim, argsCtx, &exc);
+        if (exc || !ctxBoxed)
+        {
+            ++g_stashJobFailed;
+            strcpy_s(g_stashJobError, "could not build the slot action context");
+            ++g_stashJobIndex;
+            return true;
+        }
+
+        SlotActionResultNative result = { kSlotStash, kActionMoveToStash, true };
+        void* argsMove[3] = { &result, slot, reinterpret_cast<uint8_t*>(ctxBoxed) + 0x10 };
+        exc = nullptr;
+        il2cpp_runtime_invoke(s_action, sim, argsMove, &exc);
+        if (exc) { ++g_stashJobFailed; strcpy_s(g_stashJobError, "move call threw an exception"); }
+        else ++g_stashJobMoved;
+
+        ++g_stashJobIndex;
+        return true;                       // one item per step; let the game settle
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------------
+// Auto open boxes: every stage box (StageBox) with unopened boxes is left-clicked through
+// its own click handler — the same call as a player click, so the game's checks
+// (inventory full, box busy) still apply. A box found waits 2s, then one box opens every 2s.
+// ---------------------------------------------------------------------------------
+static volatile bool g_autoOpenBoxes = false;
+static const ULONGLONG kBoxOpenIntervalMs = 2000;
+
+struct BoxApi
+{
+    void* stageBoxClass = nullptr;
+    void* findObjects = nullptr;   // UnityEngine.Object.FindObjectsOfType(Type)
+    void* typeObject = nullptr;    // typeof(StageBox)
+    void* click = nullptr;         // StageBox.(PointerEventData.InputButton) click handler
+    void* count = nullptr;         // static int (EBoxType, EContentType)
+    void* boxTypeField = nullptr;
+    void* contentTypeField = nullptr;
+};
+static BoxApi g_box;
+static char   g_boxError[128] = {};
+
+static bool ResolveBoxApi()
+{
+    if (g_box.findObjects && g_box.typeObject && g_box.click && g_box.count) return true;
+    if (!g_domain || !il2cpp_class_get_type || !il2cpp_type_get_object || !il2cpp_method_get_param)
+    {
+        strcpy_s(g_boxError, "il2cpp type API missing");
+        return false;
+    }
+    if (!g_box.stageBoxClass) g_box.stageBoxClass = FindClass(g_domain, "TaskbarHero.UI", "StageBox");
+    if (!g_box.stageBoxClass) { strcpy_s(g_boxError, "StageBox class not found"); return false; }
+
+    if (!g_box.findObjects)
+    {
+        void* objClass = FindClass(g_domain, "UnityEngine", "Object");
+        g_box.findObjects = objClass ? il2cpp_class_get_method_from_name(objClass, "FindObjectsOfType", 1) : nullptr;
+    }
+    if (!g_box.typeObject)
+        g_box.typeObject = il2cpp_type_get_object(il2cpp_class_get_type(g_box.stageBoxClass));
+    if (!g_box.click)
+    {
+        void* iter = nullptr;
+        void* m = nullptr;
+        while ((m = il2cpp_class_get_methods(g_box.stageBoxClass, &iter)) != nullptr)
+        {
+            if (il2cpp_method_get_param_count(m) != 1) continue;
+            char* tn = il2cpp_type_get_name(il2cpp_method_get_param(m, 0));
+            bool match = tn && StrContains(tn, "InputButton");
+            if (tn && il2cpp_free) il2cpp_free(tn);
+            if (match) { g_box.click = m; break; }
+        }
+    }
+    if (!g_box.count && g_shared && g_shared->rvaBoxCount > 0)
+        g_box.count = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaBoxCount), 2, nullptr);
+    if (!g_box.boxTypeField)
+        g_box.boxTypeField = il2cpp_class_get_field_from_name(g_box.stageBoxClass, "m_boxType");
+    if (!g_box.contentTypeField)
+        g_box.contentTypeField = il2cpp_class_get_field_from_name(g_box.stageBoxClass, "m_contentType");
+
+    if (!g_box.findObjects)      strcpy_s(g_boxError, "FindObjectsOfType not found");
+    else if (!g_box.typeObject)  strcpy_s(g_boxError, "typeof(StageBox) not available");
+    else if (!g_box.click)       strcpy_s(g_boxError, "box click handler not found");
+    else if (!g_box.count)       strcpy_s(g_boxError, "box count method not resolved on this build");
+    else if (!g_box.boxTypeField || !g_box.contentTypeField) strcpy_s(g_boxError, "box type fields not found");
+    else return true;
+    return false;
+}
+
+static int32_t BoxCount(void* stageBox)
+{
+    int32_t boxType = 0, contentType = 0;
+    il2cpp_field_get_value(stageBox, g_box.boxTypeField, &boxType);
+    il2cpp_field_get_value(stageBox, g_box.contentTypeField, &contentType);
+    void* args[2] = { &boxType, &contentType };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(g_box.count, nullptr, args, &exc);
+    if (exc || !boxed) return 0;
+    return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+}
+
+static ULONGLONG g_boxNextCheck  = 0;
+static ULONGLONG g_boxReadyAt    = 0;      // 0 = no box seen yet
+static ULONGLONG g_boxPauseUntil = 0;
+static void*     g_boxLastTarget = nullptr;
+static int32_t   g_boxLastCount  = 0;
+static int32_t   g_boxNoProgress = 0;
+static volatile LONG g_boxOpened = 0;
+
+static void BoxJobTick()
+{
+    ULONGLONG now = GetTickCount64();
+    if (now < g_boxNextCheck || now < g_boxPauseUntil) return;
+    g_boxNextCheck = now + 250;
+    if (!ResolveBoxApi()) return;
+
+    void* args[1] = { g_box.typeObject };
+    void* exc = nullptr;
+    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
+    if (exc || !arr) return;
+
+    void* target = nullptr;
+    int32_t count = 0;
+    uint32_t n = il2cpp_array_length(arr);
+    void** elems = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+    for (uint32_t i = 0; i < n && !target; ++i)
+    {
+        if (!elems[i]) continue;
+        int32_t c = BoxCount(elems[i]);
+        if (c > 0) { target = elems[i]; count = c; }
+    }
+    if (!target)
+    {
+        g_boxReadyAt = 0;
+        g_boxNoProgress = 0;
+        return;
+    }
+    if (!g_boxReadyAt) { g_boxReadyAt = now + kBoxOpenIntervalMs; return; }   // found: wait 2s
+    if (now < g_boxReadyAt) return;
+
+    // Count not going down (inventory full, popup open...): back off instead of spamming.
+    if (target == g_boxLastTarget && count >= g_boxLastCount)
+    {
+        if (++g_boxNoProgress >= 5)
+        {
+            g_boxNoProgress = 0;
+            g_boxReadyAt = 0;
+            g_boxPauseUntil = now + 30000;
+            return;
+        }
+    }
+    else
+        g_boxNoProgress = 0;
+
+    int32_t leftButton = 0;
+    void* clickArgs[1] = { &leftButton };
+    exc = nullptr;
+    il2cpp_runtime_invoke(g_box.click, target, clickArgs, &exc);
+    if (!exc) InterlockedIncrement(&g_boxOpened);
+    g_boxLastTarget = target;
+    g_boxLastCount = count;
+    g_boxReadyAt = now + kBoxOpenIntervalMs;                                  // next one in 2s
+}
+
+static void HookedSimUpdate(void* self, const void* method)
+{
+    g_lastFrameTick = GetTickCount64();
+    bool paused = g_shared && g_shared->trainerPaused;
+    if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
+    if (g_stashJobActive && self && !g_shuttingDown && !paused)
+    {
+        // ~6 frames between moves so the game's move animation / save can finish.
+        if ((++g_stashJobFrame % 6) == 0 && !StashJobStep(self))
+            InterlockedExchange(&g_stashJobActive, 0);
+    }
+    g_origSimUpdate(self, method);
+}
+
+// Detours SlotInteractionManager.Update: its prologue must be exactly
+// "push rbx; sub rsp,20h" (40 53 48 83 EC 20), otherwise nothing is patched.
+static bool InstallSimUpdateHook()
+{
+    if (g_origSimUpdate) return true;
+    if (g_simHookTried) return false;
+    g_simHookTried = true;
+
+    void* klass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
+    void* update = klass ? il2cpp_class_get_method_from_name(klass, "Update", 0) : nullptr;
+    uint8_t* target = static_cast<uint8_t*>(MethodPointer(update));
+    static const uint8_t kPrologue[6] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20 };
+    if (!target || memcmp(target, kPrologue, sizeof(kPrologue)) != 0) return false;
+
+    // Stub within +-2GB of the target so a 5-byte rel32 jmp can reach it.
+    uint8_t* stub = nullptr;
+    uintptr_t base = reinterpret_cast<uintptr_t>(target) & ~static_cast<uintptr_t>(0xFFFF);
+    for (uintptr_t delta = 0x10000; delta < 0x70000000 && !stub; delta += 0x10000)
+    {
+        for (int dir = -1; dir <= 1 && !stub; dir += 2)
+        {
+            uintptr_t addr = dir < 0 ? base - delta : base + delta;
+            stub = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(addr), 0x1000,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        }
+    }
+    if (!stub) return false;
+
+    // stub+0:  jmp [rip+0] -> HookedSimUpdate
+    // stub+32: original prologue, then jmp [rip+0] -> target+6 (trampoline)
+    auto absJmp = [](uint8_t* at, const void* dest)
+    {
+        at[0] = 0xFF; at[1] = 0x25; memset(at + 2, 0, 4);
+        void* d = const_cast<void*>(dest);
+        memcpy(at + 6, &d, 8);
+    };
+    absJmp(stub, reinterpret_cast<void*>(&HookedSimUpdate));
+    uint8_t* tramp = stub + 32;
+    memcpy(tramp, kPrologue, sizeof(kPrologue));
+    absJmp(tramp + sizeof(kPrologue), target + sizeof(kPrologue));
+    g_origSimUpdate = reinterpret_cast<SimUpdateFn>(tramp);
+
+    // Swap the first 8 bytes in one atomic store (the function is 16-byte aligned) so the
+    // main thread never executes a half-written jump.
+    if ((reinterpret_cast<uintptr_t>(target) & 7) != 0) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(target, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    uint8_t patch[8];
+    memcpy(patch, target, 8);
+    int32_t rel = static_cast<int32_t>(stub - (target + 5));
+    patch[0] = 0xE9;
+    memcpy(patch + 1, &rel, 4);
+    patch[5] = 0x90;
+    int64_t value = 0;
+    memcpy(&value, patch, 8);
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(target), value);
+    VirtualProtect(target, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, 8);
+    return true;
+}
+
+// Background work only runs while the game is alive: not closing, and (when the Update
+// detour is installed) a frame was rendered within the last second.
+static bool GameAlive()
+{
+    if (g_shuttingDown) return false;
+    if (!g_origSimUpdate) return true;
+    return GetTickCount64() - g_lastFrameTick < 1000;
+}
+
+static LRESULT CALLBACK ShutdownCallWndHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION)
+    {
+        auto* m = reinterpret_cast<CWPSTRUCT*>(lParam);
+        if (m->message == WM_CLOSE || m->message == WM_DESTROY || m->message == WM_ENDSESSION)
+            g_shuttingDown = true;
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+static LRESULT CALLBACK ShutdownGetMsgHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION)
+    {
+        auto* m = reinterpret_cast<MSG*>(lParam);
+        if (m->message == WM_QUIT || m->message == WM_CLOSE)
+            g_shuttingDown = true;
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+static BOOL CALLBACK FindUnityWindow(HWND hwnd, LPARAM out)
+{
+    DWORD pid = 0;
+    DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
+    char cls[64] = {};
+    GetClassNameA(hwnd, cls, sizeof(cls));
+    if (pid == GetCurrentProcessId() && strcmp(cls, "UnityWndClass") == 0)
+    {
+        *reinterpret_cast<DWORD*>(out) = tid;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// Watch the game window's thread for close / quit messages.
+static void InstallShutdownWatch()
+{
+    DWORD mainThread = 0;
+    EnumWindows(FindUnityWindow, reinterpret_cast<LPARAM>(&mainThread));
+    if (!mainThread) return;
+    SetWindowsHookExW(WH_CALLWNDPROC, ShutdownCallWndHook, nullptr, mainThread);
+    SetWindowsHookExW(WH_GETMESSAGE, ShutdownGetMsgHook, nullptr, mainThread);
+}
+
+// Command 15: move every inventory item with level >= value into the stash (main thread).
+static void RunAutoStash()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    if (!InstallSimUpdateHook())
+    {
+        size_t n = ScanAppend(text, cap, 0, "ERROR: could not hook SlotInteractionManager.Update on this build.\r\n");
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    g_stashJobMinLevel = g_heroScan->value > 0 ? static_cast<int32_t>(g_heroScan->value) : 90;
+    g_stashJobIndex = 0;
+    g_stashJobMoved = 0;
+    g_stashJobFailed = 0;
+    g_stashJobFrame = 0;
+    g_stashJobError[0] = '\0';
+    InterlockedExchange(&g_stashJobActive, 1);
+
+    for (int waited = 0; g_stashJobActive && waited < 30000; waited += 50)
+        Sleep(50);
+    bool timedOut = g_stashJobActive != 0;
+    InterlockedExchange(&g_stashJobActive, 0);
+
+    size_t n = ScanAppend(text, cap, 0, "%s Auto stash (Lv%d+): moved %d, failed %d%s%s%s\r\n",
+        g_stashJobFailed == 0 && !timedOut ? "OK:" : "WARN:", g_stashJobMinLevel, g_stashJobMoved, g_stashJobFailed,
+        timedOut ? " (timed out - is the game window running?)" : "",
+        g_stashJobError[0] ? " - last error: " : "", g_stashJobError);
+    g_heroScan->length = static_cast<int32_t>(n);
+    g_heroScan->done = g_stashJobFailed == 0 && !timedOut ? 1 : -1;
+}
+
 static void RunHeroCommand()
 {
     if (!g_heroScan) return;
     g_heroScan->done = 0;
     g_heroScan->length = 0;
     memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+
+    if (g_heroScan->command == 16)
+    {
+        bool on = g_heroScan->value != 0.0f;
+        size_t n = 0;
+        if (on && !InstallSimUpdateHook())
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "ERROR: Auto open boxes - could not hook SlotInteractionManager.Update on this build.\r\n");
+        else if (on && !ResolveBoxApi())
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Auto open boxes - %s.\r\n", g_boxError);
+        else
+        {
+            g_boxReadyAt = 0;
+            g_boxPauseUntil = 0;
+            g_boxNoProgress = 0;
+            g_autoOpenBoxes = on;
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: Auto open boxes %s%s (opened so far: %ld)\r\n",
+                on ? "ON" : "OFF", on ? " - one box every 2s" : "", g_boxOpened);
+        }
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = g_autoOpenBoxes == on ? 1 : -1;
+        return;
+    }
 
     if (g_heroScan->command == 12 || g_heroScan->command == 13)
     {
@@ -2846,10 +3472,37 @@ static DWORD WINAPI WorkerThread(LPVOID)
     g_lastSpawnReq   = g_shared->spawnRequest;
 
     bool wasEnabled = false;
+    InstallShutdownWatch();
+    InstallSimUpdateHook();   // also provides the per-frame "game alive" signal
 
     for (;;)
     {
         g_shared->heartbeat++;
+
+        if (g_shuttingDown)
+        {
+            // Game is closing: never touch il2cpp again.
+            Sleep(50);
+            continue;
+        }
+        if (!GameAlive())
+        {
+            Sleep(16);
+            continue;
+        }
+
+        if (g_shared->trainerPaused)
+        {
+            // Trainer disconnected: restore normal speed once, then stay idle until the
+            // next Connect so the game can be closed without the hook touching il2cpp.
+            if (wasEnabled)
+            {
+                SetTimeScale(1.0f);
+                wasEnabled = false;
+            }
+            Sleep(50);
+            continue;
+        }
 
         if (g_shared->speedEnabled)
         {
@@ -2934,6 +3587,20 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 RunHeroScan();
             else if (g_heroScan->command == 7)
                 RunHeroLayoutDump();
+            else if (g_heroScan->command == 15)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunAutoStash();
+            }
+            else if (g_heroScan->command == 14)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunInventoryScan();
+            }
             else
                 RunHeroCommand();
         }
@@ -2948,6 +3615,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
     {
         DisableThreadLibraryCalls(hModule);
         CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
+    }
+    else if (reason == DLL_PROCESS_DETACH)
+    {
+        g_shuttingDown = true;
     }
     return TRUE;
 }

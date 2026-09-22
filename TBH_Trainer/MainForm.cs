@@ -35,6 +35,7 @@ internal sealed class MainForm : Form
     private Button _btnWriteHeroStat = null!;
     private CheckBox _chkOneHitKill = null!;
     private CheckBox _chkGodMode = null!;
+    private CheckBox _chkAutoOpenBoxes = null!;
 
     private TextBox _txtItemKey = null!;
     private ComboBox _cmbGrade = null!;
@@ -42,6 +43,7 @@ internal sealed class MainForm : Form
     private Button _btnSpawnItem = null!;
     private Button _btnScanItems = null!;
     private Button _btnExportCatalog = null!;
+    private Button _btnAutoStash = null!;
     private Label _lblSpawnStatus = null!;
     private ItemScanBridge? _scanBridge;
     private DateTime _lastSpawnClick = DateTime.MinValue;
@@ -180,7 +182,7 @@ internal sealed class MainForm : Form
     {
         var list = new List<string>();
         if (!build.GameApiVerified) list.Add("Stash item spawn / export catalog");
-        else if (!build.ItemScanSupported) list.Add("Scan items (use Export catalog for itemKeys)");
+        else if (!build.ItemScanSupported && !build.InventoryScanSupported) list.Add("Scan items (use Export catalog for itemKeys)");
         if (!build.HeroStatsVerified) list.Add("Hero stats (HP / Attack Speed lock)");
         return list;
     }
@@ -258,11 +260,20 @@ internal sealed class MainForm : Form
         int y = 8;
 
         // === 1. Connect ===
-        var grp1 = MakeGroup(page, "1. Connect to Game", ref y, 55);
-        _btnAttach = MakeBtn("Connect", 15, 22, 120);
+        var grp1 = MakeGroup(page, "1. Connect to Game", ref y, 74);
+        _btnAttach = MakeBtn("Connect", 15, 22, 110);
         _btnAttach.Click += OnAttach;
-        _lblStatus = new Label { Text = "Disconnected", ForeColor = Color.FromArgb(255, 100, 100), Location = new Point(145, 27), AutoSize = true };
-        grp1.Controls.AddRange(new Control[] { _btnAttach, _lblStatus });
+        var btnLaunch = MakeBtn("Launch Game", 132, 22, 110);
+        btnLaunch.Click += OnLaunchGame;
+        _lblStatus = new Label { Text = "Disconnected", ForeColor = Color.FromArgb(255, 100, 100), Location = new Point(252, 27), AutoSize = true };
+        // Known issue: closing the game while the hook is active can crash it on exit.
+        var lblCloseNote = new Label
+        {
+            Text = "⚠ Press Disconnect before closing the game (otherwise the game may crash on exit).",
+            ForeColor = Color.FromArgb(255, 200, 50), Location = new Point(15, 52), AutoSize = true,
+            Font = new Font("Segoe UI", 8.5f)
+        };
+        grp1.Controls.AddRange(new Control[] { _btnAttach, btnLaunch, _lblStatus, lblCloseNote });
 
         // === 2. Anti-Cheat Bypass ===
         var grp2 = MakeGroup(page, "2. Anti-Cheat Bypass (ACTk)", ref y, 55);
@@ -308,7 +319,7 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Stash Item Spawn (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 154);
+        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 190);
         grp6.Controls.Add(new Label
         {
             Text = "Each ItemKey has a fixed rarity in the catalog. Grade picks another row (e.g. 304061 Immortal → Cosmic uses 309161). Export catalog to browse IDs.",
@@ -353,7 +364,20 @@ internal sealed class MainForm : Form
             MaximumSize = new Size(150, 34),
             ForeColor = TextDim, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
         };
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _lblSpawnStatus });
+        // Moves every Lv90+ item from the hero bag into the stash (same calls as a player click).
+        _btnAutoStash = MakeBtn($"Auto Stash (Lv{AutoStashMinLevel}+)", 15, 132, 170);
+        _btnAutoStash.Enabled = false;
+        _btnAutoStash.Click += OnAutoStash;
+
+        // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
+        _chkAutoOpenBoxes = new CheckBox
+        {
+            Text = "Auto open boxes (every 2s)", Location = new Point(200, 136), AutoSize = true,
+            ForeColor = TextMain, Checked = true
+        };
+        _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
+
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -534,6 +558,8 @@ internal sealed class MainForm : Form
         if (_mem.IsAttached)
         {
             _bridge.SetSpeed(false, 1.0f);
+            _bridge.Pause();
+            Thread.Sleep(150);   // let the hook finish its current step before we let go
             _bridge.Dispose();
             _scanBridge?.Dispose();
             _scanBridge = null;
@@ -552,7 +578,7 @@ internal sealed class MainForm : Form
             _btnScanHeroes.Enabled = false;
             _btnWriteHeroStat.Enabled = false;
             SetSpawnControlsEnabled(false);
-            Log("Disconnected.");
+            Log("Disconnected. The hook is idle now — it is safe to close the game.");
             return;
         }
 
@@ -624,6 +650,30 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>PID of the single running TaskBarHero process, or -1 if none / ambiguous.</summary>
+    private const string SteamAppId = "3678970";
+
+    /// <summary>Starts the game through Steam (keeps Steam overlay / cloud saves working).</summary>
+    private void OnLaunchGame(object? sender, EventArgs e)
+    {
+        if (FindGamePid() >= 0 || System.Diagnostics.Process.GetProcessesByName("TaskBarHero").Length > 0)
+        {
+            Log("Taskbar Hero is already running — press Connect.");
+            return;
+        }
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo($"steam://rungameid/{SteamAppId}")
+            {
+                UseShellExecute = true,
+            });
+            Log("Launching Taskbar Hero through Steam… press Connect once you are in the game.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not launch the game through Steam: {ex.Message}");
+        }
+    }
+
     private static int FindGamePid()
     {
         var procs = System.Diagnostics.Process.GetProcessesByName("TaskBarHero");
@@ -757,8 +807,9 @@ internal sealed class MainForm : Form
         _cmbGrade.Enabled = enabled;
         _txtSpawnCount.Enabled = enabled;
         _btnSpawnItem.Enabled = enabled;
-        _btnScanItems.Enabled = enabled && _buildProfile.ItemScanSupported;
+        _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
         _btnExportCatalog.Enabled = enabled;
+        _btnAutoStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
     }
 
     private void OnExportCatalog(object? sender, EventArgs e)
@@ -881,11 +932,12 @@ internal sealed class MainForm : Form
 
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
         if (_chkGodMode.Checked) ApplyCombatToggle(13, true);
+        if (_chkAutoOpenBoxes.Checked && _buildProfile.BoxCountRva > 0) ApplyCombatToggle(16, true);
     }
 
     /// <summary>
     /// Command 12 = one-hit kill, 13 = god mode (plus an Armor lock on every hero slot,
-    /// released again when god mode is turned off).
+    /// released again when god mode is turned off), 16 = auto open boxes.
     /// </summary>
     private void ApplyCombatToggle(int command, bool on)
     {
@@ -1040,6 +1092,11 @@ internal sealed class MainForm : Form
     private void OnScanItems(object? sender, EventArgs e)
     {
         if (!EnsureGameApiAllowed("Item scan")) return;
+        if (!_buildProfile.ItemScanSupported && _buildProfile.InventoryScanSupported)
+        {
+            RunInventoryScan();
+            return;
+        }
         if (!_buildProfile.ItemScanSupported)
         {
             Log($"Item scan is not supported on {_buildProfile.VersionLabel}. Use Export catalog to find itemKeys.");
@@ -1131,6 +1188,49 @@ internal sealed class MainForm : Form
         {
             _btnScanItems.Enabled = true;
         }
+    }
+
+    /// <summary>Gear at this level or above is moved to the stash (current max levels: 90 and 100).</summary>
+    private const int AutoStashMinLevel = 90;
+
+    private void OnAutoStash(object? sender, EventArgs e)
+    {
+        if (!EnsureGameApiAllowed("Auto stash")) return;
+        if (!EnsureSpeedReady()) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        _btnAutoStash.Enabled = false;
+        try
+        {
+            Log($"--- Auto stash: moving Lv{AutoStashMinLevel}+ items from the bag to the stash ---");
+            string? result = _heroScanBridge.WriteValue(15, 0, AutoStashMinLevel, timeoutMs: 35000);
+            Log(result?.Trim() ?? "ERROR: auto stash timed out.");
+            RunInventoryScan();
+        }
+        finally
+        {
+            _btnAutoStash.Enabled = true;
+        }
+    }
+
+    /// <summary>1.2.6+: read-only inventory listing through the game's slot API.</summary>
+    private void RunInventoryScan()
+    {
+        if (!EnsureSpeedReady()) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        string? report = _heroScanBridge.RunInventoryScan();
+        if (report == null) { Log("ERROR: inventory scan timed out."); return; }
+        foreach (string line in report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+            Log(line);
     }
 
     private void OnSpawnItem(object? sender, EventArgs e)
@@ -1364,7 +1464,15 @@ internal sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        try { if (_bridge.IsConnected) _bridge.SetSpeed(false, 1.0f); } catch { }
+        try
+        {
+            if (_bridge.IsConnected)
+            {
+                _bridge.SetSpeed(false, 1.0f);
+                _bridge.Pause();   // closing the trainer also leaves the hook idle
+            }
+        }
+        catch { }
         _heroScanBridge?.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

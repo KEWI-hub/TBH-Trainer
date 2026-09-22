@@ -48,6 +48,24 @@ internal sealed class GameBuildProfile
     /// <summary>Item scan reads stash/save classes by obfuscated name (1.00.08 / 1.00.09 only).</summary>
     public bool ItemScanSupported { get; init; } = true;
 
+    /// <summary>rz.ikf(ESlotType, int) -> uid of the item in a slot (inventory scan / auto stash). 0 = n/a.</summary>
+    public int SlotUidRva { get; init; }
+    /// <summary>rz.ikc(ESlotType, int) -> ItemSlot UI object.</summary>
+    public int SlotObjRva { get; init; }
+    /// <summary>SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext.</summary>
+    public int SlotCtxRva { get; init; }
+    /// <summary>SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext) — executes a slot move.</summary>
+    public int SlotActionRva { get; init; }
+
+    /// <summary>static Stash.kcc(int) -> StashCache (per-slot unlock state; stash size differs per player).</summary>
+    public int StashCacheRva { get; init; }
+
+    /// <summary>static int wh.uy.jif(EBoxType, EContentType) -> unopened stage boxes (auto open boxes).</summary>
+    public int BoxCountRva { get; init; }
+
+    /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
+    public bool InventoryScanSupported => SlotUidRva > 0;
+
     // Legacy property names for TrainerBridge / hook shared mem
     public int StashJbg => StashInsertRva;
     public int StashJbp => StashSlotRva;
@@ -177,6 +195,14 @@ internal sealed class GameBuildProfile
         StashSaveDataCtor = 0,
         ItemAddRva = 0x978030,      // wh.vc.jmk(int itemKey, ulong uid, EItemGetSourceType, int count, bool)
         ItemInfoRva = 0x979070,     // wh.vc.jmu(int itemKey) -> ItemInfoData
+        // Slot API (the path the game uses when the player clicks a slot). rz has many cloned
+        // accessors; these are the ones SlotInteractionManager actually calls.
+        SlotUidRva = 0x8E86A0,      // rz.ikf(ESlotType, int) -> ulong uid
+        SlotObjRva = 0x8E7D00,      // rz.ikc(ESlotType, int) -> ItemSlot
+        SlotCtxRva = 0x8F0830,      // SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext
+        SlotActionRva = 0x8F0A90,   // SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext)
+        StashCacheRva = 0x9B35F0,   // wh.Stash.kcc(int) -> StashCache
+        BoxCountRva   = 0x9638A0,   // wh.uy.jif(EBoxType, EContentType) -> box count (used by StageBox click)
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,

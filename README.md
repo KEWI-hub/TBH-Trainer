@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.4.2
+**เวอร์ชัน trainer:** v1.4.3
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4 และ **1.2.6**
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -70,7 +70,10 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 | ตีทีเดียวตาย (ตรึง HP มอนไว้ที่ 1) | ✅ |
 | God mode (เติม HP ทุก ~33 ms + lock Armor) | ✅ |
 | Item spawn + Export catalog | ✅ |
-| Scan items | ❌ ปิดไว้ (ต้อง map class stash/save ก่อน) |
+| Scan items (อ่าน inventory + ช่อง Stash ที่ปลดล็อกแล้ว, 1.2.6) | ✅ |
+| Auto Stash: ย้ายของ Lv90+ จากกระเป๋าเข้า Stash (1.2.6) | ✅ |
+| Auto เปิดกล่อง: เจอกล่อง → รอ 2 วิ → เปิดทีละกล่องทุก 2 วิ (1.2.6) | ✅ |
+| ปุ่ม Launch Game (เปิดเกมผ่าน Steam) | ✅ |
 | Hero EXP on Kill | 🗑️ ลบออกแล้ว |
 | แท็บ Extra Features | 🗑️ ลบออกแล้ว |
 
@@ -81,6 +84,7 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 3. กด **Connect** ปุ่มเดียว trainer จะทำต่อเองทั้งหมด: เลือก process → ACTk bypass → inject hook → scan hero → lock stat → เปิดตีทีเดียวตายและ God mode
 4. Speedhack และ Item spawn กดใช้เพิ่มได้ตามต้องการ
 5. กด Minimize แล้วหน้าต่างจะยุบไปที่ system tray มุมขวาล่าง คลิกซ้ายที่ไอคอนเพื่อเรียกกลับ
+6. **ก่อนปิดเกมให้กด Disconnect ทุกครั้ง** (หรือปิด Trainer ก่อน) hook จะคืน speed ปกติแล้วหยุดเรียกเข้าเกม ถ้าปิดเกมตอนที่ hook ยังทำงานอยู่ เกมอาจ crash ตอนปิด (known issue, ยังไม่แก้)
 
 ## อัปเดตอัตโนมัติ (v1.4.1 ขึ้นไป)
 
@@ -94,7 +98,16 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 
 ค่าที่ lock อัตโนมัติ: HP 10,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
 
-lock ทำงานอยู่ใน hook ที่อยู่ในเกม **ปิด trainer แล้วยังทำงานต่อ** จนกว่าจะปิดเกม และ lock ผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ
+lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v1.4.3
+
+- Auto เปิดกล่อง (checkbox **Auto open boxes (every 2s)** ติ๊กไว้ตั้งแต่เปิดโปรแกรม) เรียก click handler ของ `StageBox` แบบเดียวกับคลิกซ้าย เกมจึงยังเช็กกระเป๋าเต็มเอง ถ้าจำนวนกล่องไม่ลด 5 ครั้งติดจะพัก 30 วิ
+- Auto Stash (Lv90+) ย้ายของผ่าน `SlotInteractionManager` บน main thread (detour `SlotInteractionManager.Update`)
+- Scan items นับเฉพาะช่อง Stash ที่ปลดล็อกแล้ว (แต่ละคนมีไม่เท่ากัน)
+- ปุ่ม Launch Game
+- Disconnect / ปิด trainer สั่ง hook ให้หยุด และมี remark ให้กด Disconnect ก่อนปิดเกม
+- `SharedState` ขยายเป็น 112 byte (`rvaBoxCount` 0x68, `trainerPaused` 0x6C) ต้องใช้ hook กับ trainer เวอร์ชันเดียวกัน
 
 ---
 
