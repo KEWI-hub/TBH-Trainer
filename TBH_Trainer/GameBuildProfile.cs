@@ -250,7 +250,47 @@ internal sealed class GameBuildProfile
         HeroStatsVerified = true,
     };
 
-    public static IReadOnlyList<GameBuildProfile> All { get; } = [V127, V126, V124, V1009, V1008];
+    /// <summary>
+    /// Taskbar Hero 1.2.8 (Steam build 25454993, 2026-09-22 16:22). Same layout as 1.2.7 and
+    /// mostly the same obfuscated names, but more decoy clones; each RVA below is the copy the
+    /// game itself calls (E8 call-site scan). ACTk file offset = RVA - 0xE00.
+    /// </summary>
+    public static GameBuildProfile V128 { get; } = new()
+    {
+        VersionLabel = "1.2.8",
+        BuildId = 10208,
+        ActkTargets =
+        [
+            ("ObscuredCheatingDetector.Check",       0x73CF60, 0x73C160, [0x41, 0x56, 0x48, 0x83, 0xEC, 0x20]),
+            ("ObscuredCheatingDetector.Compare",     0x73D0F0, 0x73C2F0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("ObscuredCheatingDetector.CompareExt",  0x73D1D0, 0x73C3D0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("InjectionDetector.Check",              0x73C480, 0x73B680, [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20]),
+            ("SpeedHackDetector.Update",             0x741E70, 0x741070, [0x40, 0x56, 0x48, 0x83, 0xEC, 0x70]),
+            ("SpeedHackDetector.OnApplicationPause", 0x741DE0, 0x740FE0, [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57]),
+        ],
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0x97C2F0,      // wh.vc.jml (25 call sites; clone mjq has none)
+        ItemInfoRva = 0x97D310,     // wh.vc.jmv (identical 260-byte clones: cbu/kdo/hwc/hgc)
+        SlotUidRva = 0x8F4000,      // rz.ikg
+        SlotObjRva = 0x8F3660,      // rz.ikd
+        SlotCtxRva = 0x8FC4C0,      // SlotInteractionManager.ink
+        SlotActionRva = 0x8FC720,   // SlotInteractionManager.inn
+        StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
+        BoxCountRva   = 0x96D650,   // wh.uy.jig
+        StashNamespace = "wh",
+        GameApiVerified = true,
+        ItemScanSupported = false,
+        HeroStatsVerified = true,
+    };
+
+    public static IReadOnlyList<GameBuildProfile> All { get; } = [V128, V127, V126, V124, V1009, V1008];
 
     public static GameBuildProfile? Detect(GameMemory mem)
     {
