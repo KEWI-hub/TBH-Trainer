@@ -2662,11 +2662,107 @@ static void BoxJobTick()
 
 static void* volatile g_stashJobSim = nullptr;   // SlotInteractionManager instance for the job
 
+// ---------------------------------------------------------------------------------
+// UI button press (main thread): finds a UI panel by class, reads one of its ButtonBase
+// fields, and invokes the underlying UnityEngine.UI.Button.onClick — exactly what the
+// game's own click does, so its checks and animations still run. Resolved by stable
+// field names (SortingButton / button), not by obfuscated method names.
+// ---------------------------------------------------------------------------------
+static volatile LONG g_uiClickPending = 0;       // 1 = queued, 0 = done
+static const char*   g_uiClickClass   = nullptr; // e.g. "UI_Stash"
+static const char*   g_uiClickField   = nullptr; // e.g. "SortingButton"
+static int32_t       g_uiClickResult  = 0;       // 1 ok, <0 error code
+static char          g_uiClickError[128] = {};
+
+static void* FindFieldOnHierarchy(void* klass, const char* name)
+{
+    for (void* k = klass; k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
+    {
+        void* f = il2cpp_class_get_field_from_name(k, name);
+        if (f) return f;
+        if (!il2cpp_class_get_parent) break;
+    }
+    return nullptr;
+}
+
+static void* FindMethodOnHierarchy(void* klass, const char* name, int argc)
+{
+    for (void* k = klass; k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
+    {
+        void* m = il2cpp_class_get_method_from_name(k, name, argc);
+        if (m) return m;
+        if (!il2cpp_class_get_parent) break;
+    }
+    return nullptr;
+}
+
+static void UiClickStep()
+{
+    g_uiClickResult = -1;
+    void* panelClass = FindClass(g_domain, "TaskbarHero", g_uiClickClass);
+    void* objClass = FindClass(g_domain, "UnityEngine", "Object");
+    void* findAll = objClass ? il2cpp_class_get_method_from_name(objClass, "FindObjectsOfType", 2) : nullptr;
+    if (!panelClass || !findAll || !il2cpp_class_get_type || !il2cpp_type_get_object)
+    {
+        strcpy_s(g_uiClickError, "UI class or FindObjectsOfType not found");
+        return;
+    }
+    void* typeObj = il2cpp_type_get_object(il2cpp_class_get_type(panelClass));
+    bool includeInactive = true;
+    void* args[2] = { typeObj, &includeInactive };
+    void* exc = nullptr;
+    void* arr = il2cpp_runtime_invoke(findAll, nullptr, args, &exc);
+    if (exc || !arr || il2cpp_array_length(arr) == 0)
+    {
+        strcpy_s(g_uiClickError, "panel not found (open it once in game)");
+        g_uiClickResult = -2;
+        return;
+    }
+    void* panel = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+
+    void* btnField = FindFieldOnHierarchy(il2cpp_object_get_class(panel), g_uiClickField);
+    void* buttonBase = nullptr;
+    if (btnField) il2cpp_field_get_value(panel, btnField, &buttonBase);
+    void* uiButtonField = buttonBase ? FindFieldOnHierarchy(il2cpp_object_get_class(buttonBase), "button") : nullptr;
+    void* uiButton = nullptr;
+    if (uiButtonField) il2cpp_field_get_value(buttonBase, uiButtonField, &uiButton);
+    if (!uiButton)
+    {
+        strcpy_s(g_uiClickError, "button object not found");
+        g_uiClickResult = -3;
+        return;
+    }
+    void* getOnClick = FindMethodOnHierarchy(il2cpp_object_get_class(uiButton), "get_onClick", 0);
+    exc = nullptr;
+    void* onClick = getOnClick ? il2cpp_runtime_invoke(getOnClick, uiButton, nullptr, &exc) : nullptr;
+    void* invoke = onClick ? FindMethodOnHierarchy(il2cpp_object_get_class(onClick), "Invoke", 0) : nullptr;
+    if (exc || !invoke)
+    {
+        strcpy_s(g_uiClickError, "onClick not available");
+        g_uiClickResult = -4;
+        return;
+    }
+    exc = nullptr;
+    il2cpp_runtime_invoke(invoke, onClick, nullptr, &exc);
+    if (exc)
+    {
+        strcpy_s(g_uiClickError, "the game's click handler threw an exception");
+        g_uiClickResult = -5;
+        return;
+    }
+    g_uiClickResult = 1;
+}
+
 static void HookedSimUpdate(void* self, const void* method)
 {
     g_lastFrameTick = GetTickCount64();
     bool paused = g_shared && g_shared->trainerPaused;
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
+    if (g_uiClickPending && !g_shuttingDown && !paused)
+    {
+        UiClickStep();
+        InterlockedExchange(&g_uiClickPending, 0);
+    }
     if (g_stashJobActive && g_stashJobSim && !g_shuttingDown && !paused)
     {
         // ~6 frames between moves so the game's move animation / save can finish.
@@ -2847,6 +2943,36 @@ static void RunHeroCommand()
     g_heroScan->done = 0;
     g_heroScan->length = 0;
     memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+
+    if (g_heroScan->command == 17)
+    {
+        // Press a game UI button on the main thread. value 1 = stash Sort.
+        size_t n = 0;
+        if (!InstallSimUpdateHook())
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "ERROR: Stash sort - could not install the per-frame hook on this build.\r\n");
+        else
+        {
+            g_uiClickClass = "UI_Stash";
+            g_uiClickField = "SortingButton";
+            g_uiClickError[0] = '\0';
+            InterlockedExchange(&g_uiClickPending, 1);
+            for (int waited = 0; g_uiClickPending && waited < 5000; waited += 20)
+                Sleep(20);
+            if (g_uiClickPending)
+            {
+                InterlockedExchange(&g_uiClickPending, 0);
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort timed out (game not running frames?).\r\n");
+            }
+            else if (g_uiClickResult == 1)
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: Stash sort pressed.\r\n");
+            else
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort - %s.\r\n", g_uiClickError);
+        }
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = g_uiClickResult == 1 ? 1 : -1;
+        return;
+    }
 
     if (g_heroScan->command == 16)
     {

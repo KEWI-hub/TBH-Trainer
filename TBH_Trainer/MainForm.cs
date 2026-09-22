@@ -44,6 +44,7 @@ internal sealed class MainForm : Form
     private Button _btnScanItems = null!;
     private Button _btnExportCatalog = null!;
     private Button _btnAutoStash = null!;
+    private Button _btnSortStash = null!;
     private Label _lblSpawnStatus = null!;
     private ItemScanBridge? _scanBridge;
     private DateTime _lastSpawnClick = DateTime.MinValue;
@@ -377,7 +378,12 @@ internal sealed class MainForm : Form
         };
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
 
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _lblSpawnStatus });
+        // Presses the game's own stash Sort button.
+        _btnSortStash = MakeBtn("Sort Stash", 405, 132, 120);
+        _btnSortStash.Enabled = false;
+        _btnSortStash.Click += OnSortStash;
+
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _btnSortStash, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -810,6 +816,7 @@ internal sealed class MainForm : Form
         _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
         _btnExportCatalog.Enabled = enabled;
         _btnAutoStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
+        _btnSortStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
     }
 
     private void OnExportCatalog(object? sender, EventArgs e)
@@ -1214,6 +1221,30 @@ internal sealed class MainForm : Form
         finally
         {
             _btnAutoStash.Enabled = true;
+        }
+    }
+
+    private void OnSortStash(object? sender, EventArgs e)
+    {
+        if (!EnsureGameApiAllowed("Stash sort")) return;
+        if (!EnsureSpeedReady()) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        _btnSortStash.Enabled = false;
+        try
+        {
+            Log("--- Stash sort: pressing the game's Sort button ---");
+            string? result = _heroScanBridge.WriteValue(17, 0, 1f, timeoutMs: 8000);
+            Log(result?.Trim() ?? "ERROR: stash sort timed out.");
+            RunInventoryScan();
+        }
+        finally
+        {
+            _btnSortStash.Enabled = true;
         }
     }
 
