@@ -538,7 +538,7 @@ internal sealed class MainForm : Form
 
         using var tagFont = new Font("Segoe UI", 8.5f);
         using (var tg = new SolidBrush(Color.FromArgb(120, 125, 142)))
-            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4, 1.2.6   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Spawn",
+            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.2.7   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Spawn",
                 tagFont, tg, tx, 50);
 
         using var pen = new Pen(AccentCyan, 2);

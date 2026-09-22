@@ -209,7 +209,48 @@ internal sealed class GameBuildProfile
         HeroStatsVerified = true,
     };
 
-    public static IReadOnlyList<GameBuildProfile> All { get; } = [V126, V124, V1009, V1008];
+    /// <summary>
+    /// Taskbar Hero 1.2.7 (Steam build 25453330, 2026-09-22). Same layout as 1.2.6 (Unit, Hero,
+    /// StageManager, ItemInfoData, StageBox, StashSaveData, SlotInteractionManager unchanged in
+    /// dump_1.2.7); ACTk file offset = RVA - 0xC00. Fewer decoy clones than 1.2.6; every RVA
+    /// below is the copy the game itself calls (checked by scanning E8 call sites).
+    /// </summary>
+    public static GameBuildProfile V127 { get; } = new()
+    {
+        VersionLabel = "1.2.7",
+        BuildId = 10207,
+        ActkTargets =
+        [
+            ("ObscuredCheatingDetector.Check",       0x73B610, 0x73AA10, [0x41, 0x56, 0x48, 0x83, 0xEC, 0x20]),
+            ("ObscuredCheatingDetector.Compare",     0x73B7A0, 0x73ABA0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("ObscuredCheatingDetector.CompareExt",  0x73B880, 0x73AC80, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("InjectionDetector.Check",              0x73AB30, 0x739F30, [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20]),
+            ("SpeedHackDetector.Update",             0x740520, 0x73F920, [0x40, 0x56, 0x48, 0x83, 0xEC, 0x70]),
+            ("SpeedHackDetector.OnApplicationPause", 0x740490, 0x73F890, [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57]),
+        ],
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0x96E5E0,      // wh.vc.jml(int itemKey, ulong uid, EItemGetSourceType, int count, bool)
+        ItemInfoRva = 0x96F760,     // wh.vc.jmv(int itemKey) -> ItemInfoData (clone of xj)
+        SlotUidRva = 0x8DC860,      // rz.ikg(ESlotType, int) -> ulong uid
+        SlotObjRva = 0x8DBEC0,      // rz.ikd(ESlotType, int) -> ItemSlot
+        SlotCtxRva = 0x8E2700,      // SlotInteractionManager.ink(rm, bool, ulong) -> SlotActionContext
+        SlotActionRva = 0x8E2960,   // SlotInteractionManager.inn(SlotActionResult, rm, SlotActionContext)
+        StashCacheRva = 0x9AC0A0,   // wh.Stash.kcd(int) -> StashCache
+        BoxCountRva   = 0x957EC0,   // wh.uy.jig(EBoxType, EContentType) -> box count
+        StashNamespace = "wh",
+        GameApiVerified = true,
+        ItemScanSupported = false,
+        HeroStatsVerified = true,
+    };
+
+    public static IReadOnlyList<GameBuildProfile> All { get; } = [V127, V126, V124, V1009, V1008];
 
     public static GameBuildProfile? Detect(GameMemory mem)
     {
