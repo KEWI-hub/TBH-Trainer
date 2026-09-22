@@ -2631,33 +2631,42 @@ static void BoxJobTick()
     g_boxReadyAt = now + kBoxOpenIntervalMs;                                  // next one in 2s
 }
 
+static void* volatile g_stashJobSim = nullptr;   // SlotInteractionManager instance for the job
+
 static void HookedSimUpdate(void* self, const void* method)
 {
     g_lastFrameTick = GetTickCount64();
     bool paused = g_shared && g_shared->trainerPaused;
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
-    if (g_stashJobActive && self && !g_shuttingDown && !paused)
+    if (g_stashJobActive && g_stashJobSim && !g_shuttingDown && !paused)
     {
         // ~6 frames between moves so the game's move animation / save can finish.
-        if ((++g_stashJobFrame % 6) == 0 && !StashJobStep(self))
+        if ((++g_stashJobFrame % 6) == 0 && !StashJobStep(g_stashJobSim))
             InterlockedExchange(&g_stashJobActive, 0);
     }
     g_origSimUpdate(self, method);
 }
 
-// Detours SlotInteractionManager.Update: its prologue must be exactly
-// "push rbx; sub rsp,20h" (40 53 48 83 EC 20), otherwise nothing is patched.
+// Per-frame main-thread hook. Detours InputManager.Update (always active) and falls back to
+// SlotInteractionManager.Update, which only runs while that UI is active. The prologue must
+// be exactly "push rbx; sub rsp,20h" (40 53 48 83 EC 20), otherwise nothing is patched.
 static bool InstallSimUpdateHook()
 {
     if (g_origSimUpdate) return true;
     if (g_simHookTried) return false;
     g_simHookTried = true;
 
-    void* klass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
-    void* update = klass ? il2cpp_class_get_method_from_name(klass, "Update", 0) : nullptr;
-    uint8_t* target = static_cast<uint8_t*>(MethodPointer(update));
     static const uint8_t kPrologue[6] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20 };
-    if (!target || memcmp(target, kPrologue, sizeof(kPrologue)) != 0) return false;
+    static const char* const kFrameClasses[] = { "InputManager", "SlotInteractionManager" };
+    uint8_t* target = nullptr;
+    for (const char* name : kFrameClasses)
+    {
+        void* klass = FindClass(g_domain, "TaskbarHero", name);
+        void* update = klass ? il2cpp_class_get_method_from_name(klass, "Update", 0) : nullptr;
+        uint8_t* p = static_cast<uint8_t*>(MethodPointer(update));
+        if (p && memcmp(p, kPrologue, sizeof(kPrologue)) == 0) { target = p; break; }
+    }
+    if (!target) return false;
 
     // Stub within +-2GB of the target so a 5-byte rel32 jmp can reach it.
     uint8_t* stub = nullptr;
@@ -2706,13 +2715,11 @@ static bool InstallSimUpdateHook()
     return true;
 }
 
-// Background work only runs while the game is alive: not closing, and (when the Update
-// detour is installed) a frame was rendered within the last second.
+// Background work only runs while the game is not closing. (No frame-based check: a paused
+// or hidden UI component must never stall hero locks and trainer commands.)
 static bool GameAlive()
 {
-    if (g_shuttingDown) return false;
-    if (!g_origSimUpdate) return true;
-    return GetTickCount64() - g_lastFrameTick < 1000;
+    return !g_shuttingDown;
 }
 
 static LRESULT CALLBACK ShutdownCallWndHook(int code, WPARAM wParam, LPARAM lParam)
@@ -2768,7 +2775,17 @@ static void RunAutoStash()
     const size_t cap = sizeof(g_heroScan->text);
     if (!InstallSimUpdateHook())
     {
-        size_t n = ScanAppend(text, cap, 0, "ERROR: could not hook SlotInteractionManager.Update on this build.\r\n");
+        size_t n = ScanAppend(text, cap, 0, "ERROR: could not install the per-frame hook on this build.\r\n");
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = -1;
+        return;
+    }
+    static void* s_simClass = nullptr;
+    if (!s_simClass) s_simClass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
+    g_stashJobSim = FindSingletonInstance(s_simClass);
+    if (!g_stashJobSim)
+    {
+        size_t n = ScanAppend(text, cap, 0, "ERROR: SlotInteractionManager not found - open the HERO bag and STASH first.\r\n");
         g_heroScan->length = static_cast<int32_t>(n);
         g_heroScan->done = -1;
         return;
@@ -2808,7 +2825,7 @@ static void RunHeroCommand()
         size_t n = 0;
         if (on && !InstallSimUpdateHook())
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-                "ERROR: Auto open boxes - could not hook SlotInteractionManager.Update on this build.\r\n");
+                "ERROR: Auto open boxes - could not install the per-frame hook on this build.\r\n");
         else if (on && !ResolveBoxApi())
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Auto open boxes - %s.\r\n", g_boxError);
         else
