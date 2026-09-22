@@ -2690,6 +2690,8 @@ static int32_t BoxCount(void* stageBox)
 static volatile bool g_autoOrganize = false;   // organize the stash after boxes are opened
 static ULONGLONG     g_orgDueAt = 0;
 static volatile LONG g_orgAutoRuns = 0;
+static volatile LONG g_orgRequest = 0;   // worker asks the main thread to start a run
+static volatile LONG g_orgBeginFailed = 0;
 static ULONGLONG g_boxNextCheck  = 0;
 static ULONGLONG g_boxReadyAt    = 0;      // 0 = no box seen yet
 static ULONGLONG g_boxPauseUntil = 0;
@@ -2897,7 +2899,6 @@ static void* g_moveCbTarget = nullptr;
 // game's toast when a move is refused), the same kind of callback the drag & drop UI passes.
 static bool ResolveMoveApi()
 {
-    if (g_moveMethod && g_moveCbMethod && g_moveCbTarget) return true;
     if (!g_moveMethod && g_shared && g_shared->rvaSlotMove > 0)
         g_moveMethod = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaSlotMove), 2, nullptr);
     if (!g_moveMethod || !il2cpp_method_get_param) return false;
@@ -3137,16 +3138,19 @@ static bool OrganizeStep()
     if (g_orgPhase == 1)   // merge same-key material stacks
     {
         if (!OrgSnapshot(rz, uidMethod, uids, nullptr, nullptr)) { strcpy_s(g_orgError, "stash read failed"); return false; }
+        static int32_t stackKey[kOrgMaxSlots];   // material key per slot if stackable, else 0
+        for (int32_t i = 0; i < g_orgSlots; ++i)
+        {
+            stackKey[i] = 0;
+            SlotItemInfo it;
+            if (uids[i] && ReadSlotItem(uids[i], &it) && it.itemType == 1 && it.maxStack > 1) stackKey[i] = it.key;
+        }
         for (int32_t a = 0; a < g_orgSlots; ++a)
         {
-            if (!uids[a]) continue;
-            SlotItemInfo ia;
-            if (!ReadSlotItem(uids[a], &ia) || ia.itemType != 1 || ia.maxStack <= 1) continue;
+            if (!stackKey[a]) continue;
             for (int32_t b = a + 1; b < g_orgSlots; ++b)
             {
-                if (!uids[b]) continue;
-                SlotItemInfo ib;
-                if (!ReadSlotItem(uids[b], &ib) || ib.key != ia.key) continue;
+                if (stackKey[b] != stackKey[a]) continue;
                 bool tried = false;
                 for (int32_t t = 0; t < g_orgMergeTriedCount; ++t)
                     if (g_orgMergeTried[t] == (uids[a] ^ (uids[b] << 1))) tried = true;
@@ -3155,7 +3159,8 @@ static bool OrganizeStep()
                 uint64_t before = uids[b];
                 MoveSlot(kSlotStash, b, kSlotStash, a, 0);
                 bool f = false;
-                if (SlotUid(rz, uidMethod, kSlotStash, b, &f) != before) ++g_orgMerged;
+                if (SlotUid(rz, uidMethod, kSlotStash, b, &f) != before &&
+                    SlotUid(rz, uidMethod, kSlotStash, a, &f) != before) ++g_orgMerged;   // not a swap
                 ++g_orgMoves;
                 return true;
             }
@@ -3252,6 +3257,12 @@ static void HookedSimUpdate(void* self, const void* method)
     {
         if ((++g_orgFrame % 3) == 0 && !OrganizeStep())
             InterlockedExchange(&g_orgActive, 0);
+    }
+    else if (g_orgRequest && !g_shuttingDown && !paused)
+    {
+        g_orgDueAt = 0;
+        InterlockedExchange(&g_orgBeginFailed, OrganizeBegin() ? 0 : 1);
+        InterlockedExchange(&g_orgRequest, 0);
     }
     else if (g_autoOrganize && g_orgDueAt && GetTickCount64() >= g_orgDueAt && !g_shuttingDown && !paused)
     {
@@ -3483,18 +3494,24 @@ static void RunHeroCommand()
         bool ok = false;
         if (!InstallSimUpdateHook())
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Organize - could not install the per-frame hook.\r\n");
-        else if (!g_orgActive && !OrganizeBegin())
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Organize - %s.\r\n", g_orgError);
         else
         {
+            // The main thread starts the run (so it can't race an automatic one).
+            if (!g_orgActive)
+            {
+                InterlockedExchange(&g_orgBeginFailed, 0);
+                InterlockedExchange(&g_orgRequest, 1);
+                for (int w = 0; g_orgRequest && w < 5000; w += 20) Sleep(20);
+            }
             int waited = 0;
             for (; g_orgActive && waited < 180000; waited += 50)
             {
                 Sleep(50);
                 if ((waited % 100) == 0) KeepHeroesAlive();
             }
-            bool timedOut = g_orgActive != 0;
-            ok = !timedOut && g_orgError[0] == '\0';
+            bool timedOut = g_orgActive != 0 || g_orgRequest != 0;
+            if (g_orgRequest) { InterlockedExchange(&g_orgRequest, 0); strcpy_s(g_orgError, "game is not running frames"); }
+            ok = !timedOut && !g_orgBeginFailed && g_orgError[0] == '\0';
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
                 "%s Organize stash: imported %d from bag, merged %d, moves %d, failed %d%s%s%s\r\n",
                 ok ? "OK:" : "WARN:", g_orgImported, g_orgMerged, g_orgMoves, g_orgFails,
