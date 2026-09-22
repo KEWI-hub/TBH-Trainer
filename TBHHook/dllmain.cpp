@@ -107,6 +107,7 @@ static int32_t    g_remapOutKey    = 0;
 // ---- il2cpp exports ----
 typedef void* (*il2cpp_domain_get_t)();
 typedef void* (*il2cpp_thread_attach_t)(void* domain);
+typedef void  (*il2cpp_thread_detach_t)(void* thread);
 typedef void** (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
 typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
 typedef void* (*il2cpp_class_from_name_t)(void* image, const char* ns, const char* name);
@@ -151,6 +152,7 @@ static il2cpp_type_get_object_t  il2cpp_type_get_object;
 
 static il2cpp_domain_get_t                 il2cpp_domain_get;
 static il2cpp_thread_attach_t              il2cpp_thread_attach;
+static il2cpp_thread_detach_t              il2cpp_thread_detach;
 static il2cpp_domain_get_assemblies_t      il2cpp_domain_get_assemblies;
 static il2cpp_assembly_get_image_t         il2cpp_assembly_get_image;
 static il2cpp_class_from_name_t            il2cpp_class_from_name;
@@ -316,6 +318,7 @@ static bool LoadIl2Cpp()
 
     il2cpp_domain_get                 = Resolve<il2cpp_domain_get_t>(g_gameAssembly,                 "il2cpp_domain_get");
     il2cpp_thread_attach              = Resolve<il2cpp_thread_attach_t>(g_gameAssembly,              "il2cpp_thread_attach");
+    il2cpp_thread_detach              = Resolve<il2cpp_thread_detach_t>(g_gameAssembly,              "il2cpp_thread_detach");
     il2cpp_domain_get_assemblies      = Resolve<il2cpp_domain_get_assemblies_t>(g_gameAssembly,      "il2cpp_domain_get_assemblies");
     il2cpp_assembly_get_image         = Resolve<il2cpp_assembly_get_image_t>(g_gameAssembly,         "il2cpp_assembly_get_image");
     il2cpp_class_from_name            = Resolve<il2cpp_class_from_name_t>(g_gameAssembly,            "il2cpp_class_from_name");
@@ -3435,7 +3438,9 @@ static DWORD WINAPI WorkerThread(LPVOID)
     void* domain = il2cpp_domain_get();
     if (!domain) return 0;
     g_domain = domain;
-    il2cpp_thread_attach(domain);
+    // Attached only while the trainer is connected: an attached foreign thread keeps the
+    // il2cpp runtime waiting at shutdown, so Disconnect detaches it (game can then exit).
+    void* il2cppThread = il2cpp_thread_attach(domain);
 
     HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                      0, kMapSize, kMapName);
@@ -3517,9 +3522,16 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 SetTimeScale(1.0f);
                 wasEnabled = false;
             }
+            if (il2cppThread && il2cpp_thread_detach)
+            {
+                il2cpp_thread_detach(il2cppThread);
+                il2cppThread = nullptr;
+            }
             Sleep(50);
             continue;
         }
+        if (!il2cppThread)
+            il2cppThread = il2cpp_thread_attach(domain);   // reconnected: resume
 
         if (g_shared->speedEnabled)
         {
