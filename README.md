@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.4.7
+**เวอร์ชัน trainer:** v1.4.8
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6, 1.2.7 และ **1.2.8** (build 25454993, profile `V128`: RVA ใหม่ layout เหมือน 1.2.7)
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -99,6 +99,13 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 ค่าที่ lock อัตโนมัติ: HP 2,000,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v1.4.8
+
+- แก้ hook ค้าง (ทุกคำสั่ง timeout, อมตะหยุด): เดิม hook เห็น `WM_DESTROY` ของหน้าต่างไหนก็ได้บน thread ของเกม แล้วคิดว่าเกมกำลังปิด แต่หน้าต่าง IME (`MSCTFIME UI`) ถูกปิดและสร้างใหม่เองระหว่างเล่น ตอนนี้ดูเฉพาะหน้าต่างหลักของ Unity, `WM_QUIT` และ `WM_ENDSESSION` เท่านั้น
+- Sort Stash เรียก handler ของปุ่ม Sort (`wh.Stash.kcb`) ตรงๆ จัดทุกหน้า ไม่ต้องเปิดหน้า Stash ก่อน
+- ระหว่างรองาน main thread (Auto Stash / Sort) ยังเติม HP และ lock ต่อ
+- `SharedState` ขยายเป็น 116 byte (`rvaStashSortAll` 0x70)
 
 ## เปลี่ยนแปลงใน v1.4.7
 
