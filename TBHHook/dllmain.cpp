@@ -2148,7 +2148,10 @@ static void* HealthControllerOf(void* unit)
 
 // One-hit kill: every live monster is kept at 1 HP, so the next hit kills it through the
 // game's normal death path (drops, EXP). Dead monsters (HP <= 1) are left alone.
-static void ApplyOneHitKill()
+// Calls fn(healthController) for every live unit of a DamageableType (1 = Hero, 2 = Monster)
+// registered in StageManager's Dictionary<DamageableType, HashSet<Unit>>.
+template <typename Fn>
+static void ForEachUnitHealth(int32_t damageableType, Fn fn)
 {
     void* stage = ResolveStageManager();
     void* field = ResolveUnitsByTypeField();
@@ -2160,9 +2163,9 @@ static void ApplyOneHitKill()
     void* tryGet = il2cpp_class_get_method_from_name(il2cpp_object_get_class(dict), "TryGetValue", 2);
     if (!tryGet) return;
 
-    int32_t monsterType = 2; // DamageableType.Monster
+    int32_t unitType = damageableType;
     void* set = nullptr;
-    void* args[2] = { &monsterType, &set };
+    void* args[2] = { &unitType, &set };
     void* exc = nullptr;
     il2cpp_runtime_invoke(tryGet, dict, args, &exc);
     if (exc || !set) return;
@@ -2182,9 +2185,32 @@ static void ApplyOneHitKill()
         if (!unit) continue;
         uint8_t* hp = reinterpret_cast<uint8_t*>(HealthControllerOf(unit));
         if (!hp) continue;
+        fn(hp);
+    }
+}
+
+static void ApplyOneHitKill()
+{
+    ForEachUnitHealth(2, [](uint8_t* hp)   // DamageableType.Monster
+    {
         float& current = *reinterpret_cast<float*>(hp + 0x40);
         if (current > 1.0f) current = 1.0f;
-    }
+    });
+}
+
+// God mode: refill every hero in the stage, not only the three UI slots (some modes,
+// e.g. Plague, may field heroes that the slot mapping does not resolve).
+static const float kGodModeHp = 2.0e9f;   // just under int.MaxValue (the game may cast HP to int)
+static void ApplyGodModeAllHeroes()
+{
+    ForEachUnitHealth(1, [](uint8_t* hp)   // DamageableType.Hero
+    {
+        float& current = *reinterpret_cast<float*>(hp + 0x40);
+        float& maxHp = *reinterpret_cast<float*>(hp + 0x4C);
+        if (current <= 0.0f) return;         // already dead: leave the game's death flow alone
+        if (maxHp < kGodModeHp) maxHp = kGodModeHp;
+        current = maxHp;
+    });
 }
 
 static bool ApplyHeroLocks(int32_t heroIndex)
@@ -3555,6 +3581,8 @@ static DWORD WINAPI WorkerThread(LPVOID)
         // god mode tightens that to ~33ms.
         if (g_oneHitKill && (g_resolveCounter % 6) == 0)
             ApplyOneHitKill();
+        if (g_godMode && (g_resolveCounter % 2) == 0)
+            ApplyGodModeAllHeroes();
         if ((g_resolveCounter % (g_godMode ? 2 : 12)) == 0)
         {
             for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex)

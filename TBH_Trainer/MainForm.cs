@@ -426,7 +426,7 @@ internal sealed class MainForm : Form
         _cmbHeroStat.SelectedIndex = 0;
 
         _txtHeroValue = MakeTxt(415, 48, 70);
-        _txtHeroValue.Text = "10000000";
+        _txtHeroValue.Text = "2000000000";
         _btnWriteHeroStat = MakeBtn("Apply", 490, 45, 48);
         _btnWriteHeroStat.Enabled = false;
         _btnWriteHeroStat.Click += OnWriteHeroStat;
@@ -885,7 +885,7 @@ internal sealed class MainForm : Form
     }
 
     // HP stays exact as a float up to 2^24; Attack Speed above ~50 gains nothing at 60 fps.
-    private const float AutoHeroHpValue = 10_000_000f;
+    private const float AutoHeroHpValue = 2_000_000_000f;
     private const float AutoHeroAttackSpeedValue = 50f;
     // Unit stats are stored as ratios: live heroes show crit chance 0.03-0.37 (1.0 = 100%),
     // crit damage 3-8x and cooldown reduction up to ~1.8. No cap exists in the data tables,
