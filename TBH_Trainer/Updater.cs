@@ -10,14 +10,14 @@ namespace TBH_Trainer;
 internal static class AppInfo
 {
     /// <summary>Bump together with the GitHub release tag (v&lt;Version&gt;).</summary>
-    public const string Version = "1.4.1";
+    public const string Version = "1.4.2";
 }
 
 /// <summary>
 /// Checks the private GitHub repo for a newer release and installs it.
-/// Each user authenticates with their own GitHub login: git's stored credential if
-/// present, otherwise a personal access token saved in Windows Credential Manager.
-/// Nothing is ever embedded in the exe.
+/// Each user authenticates with their own GitHub login: GitHub logins that git saved in
+/// Windows Credential Manager (every account is tried until one can see the repo), or a
+/// personal access token entered from the tray menu. Nothing is ever embedded in the exe.
 /// </summary>
 internal static class Updater
 {
@@ -37,35 +37,48 @@ internal static class Updater
     /// </summary>
     public static async Task CheckAsync(Form owner, Action<string> log, bool interactive)
     {
-        string? token = GitCredentialToken() ?? ReadStoredToken();
-        if (token == null)
+        var tokens = new List<string>();
+        if (ReadStoredToken() is string stored) tokens.Add(stored);
+        tokens.AddRange(GitCredentialTokens());
+        if (tokens.Count == 0)
         {
             if (!interactive) { log(NotInvitedHint); return; }
-            token = PromptForToken(owner);
-            if (token == null) return;
-            WriteStoredToken(token);
+            if (PromptForToken(owner) is not string entered) return;
+            WriteStoredToken(entered);
+            tokens.Add(entered);
         }
 
-        Release? latest;
-        try
+        // A PC can hold several GitHub accounts; use the first one that can see the repo.
+        string? token = null;
+        Release? latest = null;
+        foreach (string candidate in tokens.Distinct())
         {
-            latest = await GetLatestReleaseAsync(token);
+            try
+            {
+                latest = await GetLatestReleaseAsync(candidate);
+                token = candidate;
+                break;
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.Unauthorized
+                                                     or System.Net.HttpStatusCode.NotFound)
+            {
+                // this account is not an invited collaborator — try the next one
+            }
+            catch (Exception ex)
+            {
+                log($"Update check failed: {ex.Message}");
+                return;
+            }
         }
-        catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.Unauthorized
-                                                 or System.Net.HttpStatusCode.NotFound)
+        if (token == null)
         {
-            log("Update check: this GitHub login has no access to the repo. " + NotInvitedHint);
+            log("Update check: no GitHub login on this PC has access to the repo. " + NotInvitedHint);
             if (interactive)
             {
                 if (ReadStoredToken() != null) DeleteStoredToken();
-                MessageBox.Show(owner, "This GitHub login can't access the trainer repo (invite not accepted, or wrong token).\n\n" +
+                MessageBox.Show(owner, "No GitHub login on this PC can access the trainer repo (invite not accepted, or wrong token).\n\n" +
                                        NotInvitedHint, "Check for updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-            return;
-        }
-        catch (Exception ex)
-        {
-            log($"Update check failed: {ex.Message}");
             return;
         }
 
@@ -199,32 +212,32 @@ internal static class Updater
 
     // ---------------------------------------------------------------- credentials
 
-    /// <summary>Reuses a GitHub login already saved for git on this PC, if any.</summary>
-    private static string? GitCredentialToken()
+    /// <summary>
+    /// GitHub tokens that Git Credential Manager saved for this Windows user
+    /// ("git:https://github.com", "git:https://&lt;user&gt;@github.com"). Read directly so no
+    /// git process runs and no login window can pop up for users who never signed in.
+    /// </summary>
+    private static List<string> GitCredentialTokens()
     {
-        try
+        var tokens = new List<string>();
+        // CredEnumerate only supports a trailing '*', so filter the host ourselves.
+        if (!CredEnumerate("git:https://*", 0, out int count, out IntPtr list)) return tokens;
         {
-            var psi = new ProcessStartInfo("git", "credential fill")
+            try
             {
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
-            psi.Environment["GCM_INTERACTIVE"] = "never";
-            using var p = Process.Start(psi);
-            if (p == null) return null;
-            p.StandardInput.Write("protocol=https\nhost=github.com\n\n");
-            p.StandardInput.Close();
-            string output = p.StandardOutput.ReadToEnd();
-            if (!p.WaitForExit(10_000)) { try { p.Kill(); } catch { } return null; }
-            foreach (string line in output.Split('\n'))
-                if (line.StartsWith("password=")) return line[9..].Trim();
+                for (int i = 0; i < count; i++)
+                {
+                    var cred = Marshal.PtrToStructure<CREDENTIAL>(Marshal.ReadIntPtr(list, i * IntPtr.Size));
+                    bool github = cred.TargetName.Equals("git:https://github.com", StringComparison.OrdinalIgnoreCase)
+                               || cred.TargetName.EndsWith("@github.com", StringComparison.OrdinalIgnoreCase);
+                    if (!github || cred.CredentialBlobSize <= 0) continue;
+                    string secret = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+                    if (!string.IsNullOrWhiteSpace(secret)) tokens.Add(secret.Trim());
+                }
+            }
+            finally { CredFree(list); }
         }
-        catch { /* git not installed */ }
-        return null;
+        return tokens;
     }
 
     private static string? PromptForToken(IWin32Window owner)
@@ -279,6 +292,9 @@ internal static class Updater
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CredWrite(ref CREDENTIAL credential, int flags);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredEnumerate(string filter, int flags, out int count, out IntPtr credentials);
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CredDelete(string target, int type, int flags);
