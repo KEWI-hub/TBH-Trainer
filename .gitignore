@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+publish/
+TrainerBuild/
+*.obj
+*.exp
+*.lib
+*.pdb
+TBHHook/TBHHook.dll
+
+# Game data extracted with Il2CppDumper / from game assets — copyrighted, never commit
+dump_*/
+
+# Runtime output written next to the trainer
+*.log
+hero_layout_*.txt
+TBH_item_catalog_*.txt
+
+# Editor / OS
+.vs/
+*.user
+.vscode/
+Thumbs.db
+release/
