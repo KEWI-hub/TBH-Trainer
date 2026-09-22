@@ -2847,12 +2847,18 @@ static bool GameAlive()
     return !g_shuttingDown;
 }
 
+// Only the real end of the game counts: the main Unity window being destroyed, WM_QUIT, or a
+// Windows session end. Other windows on the same thread (popups, splash, IME) are destroyed
+// during normal play, and WM_CLOSE can be cancelled, so neither may stop the hook.
+static HWND g_unityHwnd = nullptr;
+
 static LRESULT CALLBACK ShutdownCallWndHook(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HC_ACTION)
     {
         auto* m = reinterpret_cast<CWPSTRUCT*>(lParam);
-        if (m->message == WM_CLOSE || m->message == WM_DESTROY || m->message == WM_ENDSESSION)
+        if ((m->message == WM_DESTROY && g_unityHwnd && m->hwnd == g_unityHwnd) ||
+            (m->message == WM_ENDSESSION && m->wParam))
             g_shuttingDown = true;
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -2863,7 +2869,7 @@ static LRESULT CALLBACK ShutdownGetMsgHook(int code, WPARAM wParam, LPARAM lPara
     if (code == HC_ACTION)
     {
         auto* m = reinterpret_cast<MSG*>(lParam);
-        if (m->message == WM_QUIT || m->message == WM_CLOSE)
+        if (m->message == WM_QUIT)
             g_shuttingDown = true;
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -2877,6 +2883,7 @@ static BOOL CALLBACK FindUnityWindow(HWND hwnd, LPARAM out)
     GetClassNameA(hwnd, cls, sizeof(cls));
     if (pid == GetCurrentProcessId() && strcmp(cls, "UnityWndClass") == 0)
     {
+        g_unityHwnd = hwnd;
         *reinterpret_cast<DWORD*>(out) = tid;
         return FALSE;
     }
@@ -3655,7 +3662,16 @@ static DWORD WINAPI WorkerThread(LPVOID)
 
         if (g_shuttingDown)
         {
-            // Game is closing: never touch il2cpp again.
+            // Game is closing: never touch il2cpp again, but still answer the trainer so it
+            // reports the state instead of timing out.
+            if (g_heroScan && g_heroScan->request != g_lastHeroScanReq)
+            {
+                g_lastHeroScanReq = g_heroScan->request;
+                size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                    "ERROR: hook stopped - it saw the game window closing. Restart the game.\r\n");
+                g_heroScan->length = static_cast<int32_t>(n);
+                g_heroScan->done = -1;
+            }
             Sleep(50);
             continue;
         }
