@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.4.0
+**เวอร์ชัน trainer:** v1.4.1
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4 และ **1.2.6**
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -81,6 +81,16 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 3. กด **Connect** ปุ่มเดียว trainer จะทำต่อเองทั้งหมด: เลือก process → ACTk bypass → inject hook → scan hero → lock stat → เปิดตีทีเดียวตายและ God mode
 4. Speedhack และ Item spawn กดใช้เพิ่มได้ตามต้องการ
 5. กด Minimize แล้วหน้าต่างจะยุบไปที่ system tray มุมขวาล่าง คลิกซ้ายที่ไอคอนเพื่อเรียกกลับ
+
+## อัปเดตอัตโนมัติ (v1.4.1 ขึ้นไป)
+
+ตอนเปิดโปรแกรม trainer จะเช็ก Release ล่าสุดของ repo `KEWI-hub/TBH-Trainer` (Private)
+
+- **คนที่ได้รับเชิญ (Collaborator)** และมี GitHub login ของ git อยู่ในเครื่อง → ถ้ามีเวอร์ชันใหม่จะขึ้นถามก่อน กดตกลงแล้วโหลด แตกไฟล์ทับ และเปิด trainer ใหม่ให้เอง
+- ได้รับเชิญแต่ไม่มี git login → คลิกขวาไอคอนที่ tray → **Check for updates** แล้วใส่ Personal Access Token ของตัวเอง (fine-grained, อ่าน Contents ของ repo นี้อย่างเดียว) เก็บไว้ใน Windows Credential Manager ของเครื่องนั้น
+- **คนที่ไม่ได้รับเชิญ** → ไม่อัปเดต ไม่ถามอะไร มีแค่ข้อความใน log ให้ไปโหลด release ใหม่เอง
+- ต้อง**ปิดเกมก่อนอัปเดต** เพราะ `TBHHook.dll` ถูกล็อกอยู่ในเกม
+- ออกเวอร์ชันใหม่: แก้ `AppInfo.Version` ใน `Updater.cs` ให้ตรงกับ tag (`v<เวอร์ชัน>`) แล้วแนบ zip ที่มี `TBH Trainer.exe` + `TBHHook.dll` ใน Release
 
 ค่าที่ lock อัตโนมัติ: HP 10,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
 

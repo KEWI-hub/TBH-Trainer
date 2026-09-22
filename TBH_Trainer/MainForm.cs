@@ -88,8 +88,10 @@ internal sealed class MainForm : Form
     {
         InitializeComponent();
         InitializeTrayIcon();
-        Shown += (_, _) =>
+        Shown += async (_, _) =>
         {
+            // Offer a newer release (invited users only) before the version warning.
+            await Updater.CheckAsync(this, Log, interactive: false);
             if (_startupDllPath != null)
                 WarnIfUnsupportedBuild(_startupDiskBuild, _startupDllPath);
         };
@@ -102,6 +104,11 @@ internal sealed class MainForm : Form
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show trainer", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("Check for updates", null, async (_, _) =>
+        {
+            RestoreFromTray();
+            await Updater.CheckAsync(this, Log, interactive: true);
+        });
         menu.Items.Add("Exit", null, (_, _) => Close());
 
         _trayIcon = new NotifyIcon
@@ -154,8 +161,8 @@ internal sealed class MainForm : Form
             MessageBox.Show(this,
                 $"Taskbar Hero version {gameVersion} is not supported by this trainer.\n\n" +
                 $"Supported builds: {supported}\n\n" +
-                "The game was probably updated. Update the trainer offsets first " +
-                "(see README.md).\n\n" +
+                "The game was probably updated. Download the latest trainer release:\n" +
+                Updater.ReleasesUrl + "\n\n" +
                 "Until then, ACTk bypass and all item / hero features will refuse to run.",
                 "Unsupported game version", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
@@ -193,7 +200,7 @@ internal sealed class MainForm : Form
 
     private void InitializeComponent()
     {
-        Text = "TBH Trainer v1.4.0";
+        Text = $"TBH Trainer v{AppInfo.Version}";
         Size = new Size(584, 920);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -507,7 +514,7 @@ internal sealed class MainForm : Form
 
         using var tagFont = new Font("Segoe UI", 8.5f);
         using (var tg = new SolidBrush(Color.FromArgb(120, 125, 142)))
-            g.DrawString("Taskbar Hero 1.00.08–1.00.09, 1.2.4, 1.2.6   •   v1.4.0   •   ACTk + Speed + Hero + Spawn",
+            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4, 1.2.6   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Spawn",
                 tagFont, tg, tx, 50);
 
         using var pen = new Pen(AccentCyan, 2);
