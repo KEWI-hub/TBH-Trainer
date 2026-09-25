@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.4.9
+**เวอร์ชัน trainer:** v1.5.0
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6, 1.2.7 และ **1.2.8** (build 25454993, profile `V128`: RVA ใหม่ layout เหมือน 1.2.7)
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -98,7 +98,18 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 
 ค่าที่ lock อัตโนมัติ: HP 2,000,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 (ตอนเปิด God mode)
 
+ปุ่ม **Max stats (all heroes)** ตั้งทั้ง 8 ค่าให้ฮีโร่ทั้ง 3 ช่องพร้อมกัน: Attack Damage 1,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10
+
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v1.5.0
+
+- **Max stats (all heroes)**: ปุ่มเดียวตั้งค่าสถานะสูงสุดให้ฮีโร่ทุกตัวในทีม แล้ว lock ไว้ (hook เขียนซ้ำทุก ~0.2 วิ ฮีโร่ที่เกิดใหม่/ฟื้นก็ได้ด้วย) กด **Release** เพื่อปลด
+  - ค่าที่ใช้: Attack Damage 1,000,000 / Attack Speed 50 / Crit Chance 1.0 (100%) / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10
+  - เป็นค่าสูงสุดเท่าที่เกมยังเล่นได้ปกติ (ค่าจริงในเกมตอนนี้ราว ๆ Move Speed 16-30, Cast Speed 0.7-3.6)
+- เพิ่ม lock แยกราย stat: **Attack Dmg / Move Speed / Cast Speed** ในกล่อง dropdown (Move Speed = Unit +0x154, Cast Speed = Unit +0x12C ยืนยันจาก property getter ของ 1.2.8)
+- แก้ **Injector**: ใช้ full path และเช็คผลของ `LoadLibraryW` จริง เมื่อก่อนถ้าโหลดไม่สำเร็จจะยังขึ้นว่า "DLL injected." แล้วไปพังทีหลังตอนทุกคำสั่ง timeout
+- hook รอ il2cpp นานขึ้น (10 วิ → 2 นาที) สำหรับตอนเปิดเกมครั้งแรกหลังรีสตาร์ตเครื่องที่โหลดช้า
 
 ## เปลี่ยนแปลงใน v1.4.9
 

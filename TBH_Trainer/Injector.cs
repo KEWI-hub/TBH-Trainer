@@ -13,6 +13,9 @@ internal static class Injector
     {
         if (!File.Exists(dllPath))
             return (false, $"DLL not found: {dllPath}");
+        // LoadLibraryW runs inside the game, whose current directory is the game folder:
+        // a relative path would silently resolve to the wrong place (or not at all).
+        dllPath = Path.GetFullPath(dllPath);
 
         IntPtr hProc = NativeApi.OpenProcess(NativeApi.PROCESS_ALL_ACCESS, false, pid);
         if (hProc == IntPtr.Zero)
@@ -40,8 +43,16 @@ internal static class Injector
             if (hThread == IntPtr.Zero)
                 return (false, "CreateRemoteThread failed.");
 
-            NativeApi.WaitForSingleObject(hThread, 5000);
+            // The thread's exit code is LoadLibraryW's return value (truncated to 32 bits):
+            // zero means the DLL did not load, and reporting success there hid the failure
+            // until every later command timed out.
+            uint wait = NativeApi.WaitForSingleObject(hThread, 5000);
+            bool gotCode = NativeApi.GetExitCodeThread(hThread, out uint exitCode);
             NativeApi.CloseHandle(hThread);
+            if (wait != 0)
+                return (true, "DLL injected (LoadLibrary still running).");
+            if (gotCode && exitCode == 0)
+                return (false, $"LoadLibraryW failed in the game for {dllPath} (blocked by antivirus?).");
             return (true, "DLL injected.");
         }
         finally

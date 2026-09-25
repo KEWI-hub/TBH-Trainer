@@ -82,7 +82,8 @@ struct HeroScanState
     int32_t length;
     int32_t command;   // 0=scan, 1=current HP, 2=max HP, 3=attack damage, 4=attack speed, 5=both HP,
                        // 6=clear locks, 7=layout dump, 8=crit chance, 9=crit damage, 10=cooldown reduction,
-                       // 11=armor, 12=one-hit kill toggle, 13=god mode toggle
+                       // 11=armor, 12=one-hit kill toggle, 13=god mode toggle,
+                       // 22=move speed, 23=cast speed, 24=max stats (all heroes)
     int32_t heroIndex;
     float   value;
     int32_t reserved;
@@ -259,8 +260,8 @@ struct HeroLocks
     float maxHpValue;
     float attackDamageValue;
     float attackSpeedValue;
-    bool  extra[4];        // Crit Chance, Crit Damage, Cooldown Reduction, Armor
-    float extraValue[4];
+    bool  extra[6];        // Crit Chance, Crit Damage, Cooldown Reduction, Armor, Move Speed, Cast Speed
+    float extraValue[6];
 };
 static HeroLocks g_heroLocks[3] = {};
 
@@ -268,11 +269,40 @@ static HeroLocks g_heroLocks[3] = {};
 // il2cpp — Unity tears its runtime down underneath us and the next call crashes the game.
 static volatile bool      g_shuttingDown   = false;
 
-// Extra ObscuredFloat stat locks on Unit (commands 8-11). Offsets match the 1.00.09
-// dump and the 1.2.4 hero layout dump (Unit.bdxp / bdxq / bdxr / bdxn).
-static const int    kExtraStatCount = 4;
-static const size_t kExtraStatOffsets[kExtraStatCount] = { 0x168, 0x17C, 0x190, 0x140 };
-static const char*  kExtraStatNames[kExtraStatCount]   = { "Critical Chance", "Critical Damage", "Cooldown Reduction", "Armor" };
+// Extra ObscuredFloat stat locks on Unit (commands 8-11 and 22-23). Offsets match the
+// 1.00.09 dump and the 1.2.4 hero layout dump (Unit.bdxp / bdxq / bdxr / bdxn).
+// Move Speed (+0x154) and Cast Speed (+0x12C) were read off the 1.2.8 Unit property
+// getters: they sit between Armor (+0x140) and Critical Chance (+0x168) in the same
+// getter order the earlier builds used.
+static const int    kExtraStatCount = 6;
+static const size_t kExtraStatOffsets[kExtraStatCount] = { 0x168, 0x17C, 0x190, 0x140, 0x154, 0x12C };
+static const char*  kExtraStatNames[kExtraStatCount]   =
+    { "Critical Chance", "Critical Damage", "Cooldown Reduction", "Armor", "Move Speed", "Cast Speed" };
+
+// Hero stat commands are not contiguous (12/13 are the combat toggles), so the two new
+// stats live on 22/23 and are mapped back to their slot in the tables above.
+static int ExtraStatIndex(int32_t command)
+{
+    if (command >= 8 && command <= 11) return command - 8;
+    if (command == 22) return 4;   // Move Speed
+    if (command == 23) return 5;   // Cast Speed
+    return -1;
+}
+
+// "Max stats" (command 24). These are the highest values that stay stable in play:
+// the unit stats are ratios, and pushing them far past this makes cooldowns and
+// animation timings degenerate (0-length casts, heroes overshooting their target).
+static const float kMaxAttackDamage = 1000000.0f;   // damage numbers stay readable
+static const float kMaxAttackSpeed  = 50.0f;        // above ~50 gains nothing at 60 fps
+static const float kMaxExtraValues[kExtraStatCount] =
+{
+    1.0f,          // Critical Chance  = 100%
+    100.0f,        // Critical Damage  = 10000%
+    10.0f,         // Cooldown Reduction (live heroes reach ~1.8)
+    5000000.0f,    // Armor (under the hook's 1e7 re-apply sanity limit)
+    60.0f,         // Move Speed (live heroes reach ~30)
+    10.0f,         // Cast Speed (live heroes reach ~2.4)
+};
 
 // Combat toggles (commands 12 / 13, value != 0 = on).
 static volatile bool g_oneHitKill = false; // keep every live monster at 1 HP
@@ -3625,11 +3655,44 @@ static void RunHeroCommand()
         return;
     }
 
+    // Max stats: every stat in the user's list, on every hero slot, locked.
+    // value > 0 applies them, value <= 0 releases just those locks.
+    if (g_heroScan->command == 24)
+    {
+        bool on = g_heroScan->value > 0.0f;
+        for (int h = 0; h < 3; ++h)
+        {
+            HeroLocks& locks = g_heroLocks[h];
+            locks.attackDamage = on;
+            locks.attackSpeed = on;
+            locks.attackDamageValue = kMaxAttackDamage;
+            locks.attackSpeedValue = kMaxAttackSpeed;
+            for (int i = 0; i < kExtraStatCount; ++i)
+            {
+                locks.extra[i] = on;
+                locks.extraValue[i] = kMaxExtraValues[i];
+            }
+            ApplyHeroLocks(h);   // heroes that are not spawned yet get it from the worker loop
+        }
+        size_t n = on
+            ? ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "OK: Max stats ON for all 3 heroes - Attack Damage %.6g, Attack Speed %.6g, "
+                "Crit Chance %.6g, Crit Damage %.6g, CDR %.6g, Armor %.6g, Move Speed %.6g, Cast Speed %.6g "
+                "(re-applied every ~0.2s, also to heroes that spawn or revive later)\r\n",
+                kMaxAttackDamage, kMaxAttackSpeed, kMaxExtraValues[0], kMaxExtraValues[1],
+                kMaxExtraValues[2], kMaxExtraValues[3], kMaxExtraValues[4], kMaxExtraValues[5])
+            : ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "OK: Max stats OFF - stat locks released on all 3 heroes (values stay until the stage reloads)\r\n");
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = 1;
+        return;
+    }
+
     // Negative value on an extra stat command releases just that lock.
-    if (g_heroScan->command >= 8 && g_heroScan->command < 8 + kExtraStatCount &&
+    if (ExtraStatIndex(g_heroScan->command) >= 0 &&
         g_heroScan->value < 0.0f && g_heroScan->heroIndex >= 0 && g_heroScan->heroIndex < 3)
     {
-        int i = g_heroScan->command - 8;
+        int i = ExtraStatIndex(g_heroScan->command);
         g_heroLocks[g_heroScan->heroIndex].extra[i] = false;
         size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: UI Hero %d %s lock released\r\n",
             g_heroScan->heroIndex + 1, kExtraStatNames[i]);
@@ -3698,9 +3761,9 @@ static void RunHeroCommand()
                 g_heroLocks[g_heroScan->heroIndex].attackSpeedValue = g_heroScan->value;
             }
         }
-        else if (g_heroScan->command >= 8 && g_heroScan->command < 8 + kExtraStatCount)
+        else if (ExtraStatIndex(g_heroScan->command) >= 0)
         {
-            int i = g_heroScan->command - 8;
+            int i = ExtraStatIndex(g_heroScan->command);
             ok = WriteObscuredFloat(hero, kExtraStatOffsets[i], g_heroScan->value);
             label = kExtraStatNames[i];
             if (ok)
@@ -3711,15 +3774,15 @@ static void RunHeroCommand()
         }
     }
     else if ((g_heroScan->command == 4 || g_heroScan->command == 5 ||
-              (g_heroScan->command >= 8 && g_heroScan->command < 8 + kExtraStatCount)) &&
+              ExtraStatIndex(g_heroScan->command) >= 0) &&
              g_heroScan->heroIndex >= 0 && g_heroScan->heroIndex < 3)
     {
         // Hero slot is empty right now (menu / between stages). Store the lock anyway;
         // ApplyHeroLocks writes it about once per second as soon as the hero spawns.
         HeroLocks& locks = g_heroLocks[g_heroScan->heroIndex];
-        if (g_heroScan->command >= 8)
+        if (ExtraStatIndex(g_heroScan->command) >= 0)
         {
-            int i = g_heroScan->command - 8;
+            int i = ExtraStatIndex(g_heroScan->command);
             locks.extra[i] = true;
             locks.extraValue[i] = g_heroScan->value;
             label = "Extra stat (pending: applies when hero spawns)";
@@ -3878,7 +3941,7 @@ static void RunHeroScan()
     {
         { "AttackDamage", 0x104 }, { "AttackSpeed", 0x118 },
         { "CastSpeed", 0x12C }, { "Armor", 0x140 },
-        { "MoveSpeedInternal", 0x154 }, { "CriticalChance", 0x168 },
+        { "MoveSpeed", 0x154 }, { "CriticalChance", 0x168 },
         { "CriticalDamage", 0x17C }, { "CooldownReduction", 0x190 },
         { "Unknown_1A4", 0x1A4 }, { "Unknown_1B8", 0x1B8 },
         { "SkillRangeExpansion", 0x1CC }, { "FireResistance", 0x1E0 },
@@ -4197,14 +4260,21 @@ static bool SpawnItem(int32_t itemKey, int32_t grade)
 
 static DWORD WINAPI WorkerThread(LPVOID)
 {
-    for (int tries = 0; tries < 200; ++tries)
+    // Up to 2 minutes: on a cold start (first launch after a reboot) the game can take a
+    // while to load GameAssembly, and giving up early left the hook silently dead.
+    for (int tries = 0; tries < 2400; ++tries)
     {
         if (LoadIl2Cpp()) break;
         Sleep(50);
     }
     if (!il2cpp_domain_get) return 0;
 
-    void* domain = il2cpp_domain_get();
+    void* domain = nullptr;
+    for (int tries = 0; tries < 600 && !domain; ++tries)   // the domain appears a moment later
+    {
+        domain = il2cpp_domain_get();
+        if (!domain) Sleep(50);
+    }
     if (!domain) return 0;
     g_domain = domain;
     // Attached only while the trainer is connected: an attached foreign thread keeps the

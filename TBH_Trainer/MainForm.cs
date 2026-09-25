@@ -33,6 +33,7 @@ internal sealed class MainForm : Form
     private ComboBox _cmbHeroStat = null!;
     private TextBox _txtHeroValue = null!;
     private Button _btnWriteHeroStat = null!;
+    private Button _btnMaxHeroStats = null!;
     private CheckBox _chkOneHitKill = null!;
     private CheckBox _chkGodMode = null!;
     private CheckBox _chkAutoOpenBoxes = null!;
@@ -442,7 +443,8 @@ internal sealed class MainForm : Form
             Location = new Point(285, 48), Size = new Size(120, 25),
             DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgInput, ForeColor = TextMain
         };
-        _cmbHeroStat.Items.AddRange(["HP Lock", "Attack Speed Lock", "Crit Chance Lock", "Crit Dmg Lock", "CDR Lock", "Armor Lock", "Clear Hero Locks"]);
+        _cmbHeroStat.Items.AddRange(["HP Lock", "Attack Speed Lock", "Attack Dmg Lock", "Crit Chance Lock",
+            "Crit Dmg Lock", "CDR Lock", "Armor Lock", "Move Speed Lock", "Cast Speed Lock", "Clear Hero Locks"]);
         _cmbHeroStat.SelectedIndex = 0;
 
         _txtHeroValue = MakeTxt(415, 48, 70);
@@ -467,9 +469,22 @@ internal sealed class MainForm : Form
         _chkGodMode.CheckedChanged += (_, _) => ApplyCombatToggle(13, _chkGodMode.Checked);
         page.Controls.AddRange(new Control[] { _chkOneHitKill, _chkGodMode });
 
+        _btnMaxHeroStats = MakeBtn("Max stats (all heroes)", 14, 108, 180);
+        _btnMaxHeroStats.Enabled = false;
+        _btnMaxHeroStats.Click += (_, _) => OnMaxHeroStats(true);
+        Button btnClearMax = MakeBtn("Release", 200, 108, 70);
+        btnClearMax.Click += (_, _) => OnMaxHeroStats(false);
+        Label lblMax = new()
+        {
+            Text = "Atk Dmg, Atk Spd, Crit, Crit Dmg, CDR, Armor, Move Spd, Cast Spd",
+            Location = new Point(278, 115), AutoSize = true, ForeColor = TextDim,
+            Font = new Font("Segoe UI", 8f)
+        };
+        page.Controls.AddRange(new Control[] { _btnMaxHeroStats, btnClearMax, lblMax });
+
         _txtHeroReport = new TextBox
         {
-            Location = new Point(14, 112), Size = new Size(514, 460),
+            Location = new Point(14, 140), Size = new Size(514, 432),
             Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, ReadOnly = true,
             BackColor = Color.FromArgb(12, 13, 18), ForeColor = Color.FromArgb(120, 220, 200),
             Font = new Font("Consolas", 8.5f), BorderStyle = BorderStyle.FixedSingle
@@ -597,6 +612,7 @@ internal sealed class MainForm : Form
             _pnlSpeed.Visible = false;
             _btnScanHeroes.Enabled = false;
             _btnWriteHeroStat.Enabled = false;
+            _btnMaxHeroStats.Enabled = false;
             SetSpawnControlsEnabled(false);
             Log("Disconnected. The hook is idle now — it is safe to close the game.");
             return;
@@ -654,6 +670,7 @@ internal sealed class MainForm : Form
             _btnScanHeroes.Enabled = true;
             _btnScanHeroes.Text = HeroApiAllowed ? "Scan active heroes" : "Dump hero layout";
             _btnWriteHeroStat.Enabled = HeroApiAllowed;
+            _btnMaxHeroStats.Enabled = HeroApiAllowed;
             SetSpawnControlsEnabled(GameApiAllowed);
             _lblSpawnStatus.Text = GameApiAllowed
                 ? "Connect hook (enable speed or spawn)"
@@ -983,6 +1000,27 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Command 24: sets every hero stat in the list to its maximum stable value on all
+    /// three hero slots and keeps it locked (the hook re-applies it every ~0.2s, so heroes
+    /// that spawn or revive later get it too). <paramref name="on"/> false releases them.
+    /// </summary>
+    private void OnMaxHeroStats(bool on)
+    {
+        if (!EnsureGameApiAllowed("Hero stats", heroOnly: true)) return;
+        if (!EnsureSpeedReady()) return;
+
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hero control channel missing. Restart game with the newest hook.");
+            return;
+        }
+
+        string? result = _heroScanBridge.WriteValue(24, 0, on ? 1f : 0f);
+        Log(result?.Trim() ?? "ERROR: max stats write timed out.");
+    }
+
     private void OnWriteHeroStat(object? sender, EventArgs e)
     {
         if (!float.TryParse(_txtHeroValue.Text, System.Globalization.NumberStyles.Float,
@@ -1005,11 +1043,14 @@ internal sealed class MainForm : Form
         {
             0 => 5,   // Current + Max HP
             1 => 4,   // Attack Speed
-            2 => 8,   // Critical Chance
-            3 => 9,   // Critical Damage
-            4 => 10,  // Cooldown Reduction
-            5 => 11,  // Armor
-            6 => 6,   // Clear locks
+            2 => 3,   // Attack Damage
+            3 => 8,   // Critical Chance
+            4 => 9,   // Critical Damage
+            5 => 10,  // Cooldown Reduction
+            6 => 11,  // Armor
+            7 => 22,  // Move Speed
+            8 => 23,  // Cast Speed
+            9 => 6,   // Clear locks
             _ => 0
         };
         string? result = _heroScanBridge.WriteValue(command, _cmbHeroIndex.SelectedIndex, value);

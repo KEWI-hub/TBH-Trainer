@@ -57,6 +57,9 @@ internal static class NativeApi
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetExitCodeThread(IntPtr handle, out uint exitCode);
+
     [DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Ansi, SetLastError = true)]
     public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
