@@ -1985,18 +1985,6 @@ static float ReadObscuredFloatFake(void* obj, size_t fieldOffset)
     return *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(obj) + fieldOffset + 0x0C);
 }
 
-static int32_t ReadObscuredInt(void* obj, size_t fieldOffset)
-{
-    uint8_t* p = reinterpret_cast<uint8_t*>(obj) + fieldOffset;
-    return *reinterpret_cast<int32_t*>(p + 0x04) ^
-           *reinterpret_cast<int32_t*>(p + 0x08);
-}
-
-static int32_t ReadObscuredIntFake(void* obj, size_t fieldOffset)
-{
-    return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + fieldOffset + 0x0C);
-}
-
 static int32_t ManagedArrayLength(void* array)
 {
     if (!array) return 0;
@@ -2009,54 +1997,6 @@ static void* ReadManagedArrayRef(void* array, int32_t index)
     if (!array || index < 0) return nullptr;
     if (il2cpp_array_get) return il2cpp_array_get(array, sizeof(void*), static_cast<size_t>(index));
     return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(array) + 0x20 + static_cast<size_t>(index) * sizeof(void*));
-}
-
-static bool InvokeFloat0(void* obj, const char* methodName, float& value)
-{
-    if (!obj || !methodName || !il2cpp_object_get_class) return false;
-    void* method = nullptr;
-    for (void* k = il2cpp_object_get_class(obj); k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
-    {
-        method = FindMethodOnClass(k, methodName, 0);
-        if (method || !il2cpp_class_get_parent) break;
-    }
-    if (!method) return false;
-    void* exc = nullptr;
-    void* boxed = il2cpp_runtime_invoke(method, obj, nullptr, &exc);
-    if (exc || !boxed) return false;
-    value = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
-    return true;
-}
-
-static bool InvokeDamageInfoOrigin0(void* obj, const char* methodName, float& value)
-{
-    if (!obj || !methodName || !il2cpp_object_get_class) return false;
-    void* method = nullptr;
-    for (void* k = il2cpp_object_get_class(obj); k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
-    {
-        method = FindMethodOnClass(k, methodName, 0);
-        if (method || !il2cpp_class_get_parent) break;
-    }
-    if (!method) return false;
-    void* exc = nullptr;
-    void* boxed = il2cpp_runtime_invoke(method, obj, nullptr, &exc);
-    if (exc || !boxed) return false;
-    value = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x18);
-    return true;
-}
-
-static bool InvokeCachedDamageInfoOrigin(const char* methodName, void* cache, float& value)
-{
-    if (!methodName || !cache) return false;
-    void* klass = FindClass(g_domain, "", "uh");
-    void* method = klass ? FindMethodOnClass(klass, methodName, 1) : nullptr;
-    if (!method) return false;
-    void* args[1] = { &cache };
-    void* exc = nullptr;
-    void* boxed = il2cpp_runtime_invoke(method, nullptr, args, &exc);
-    if (exc || !boxed) return false;
-    value = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x18);
-    return true;
 }
 
 // Cached: god mode / one-hit kill resolve the stage several times per second.
@@ -3909,8 +3849,7 @@ static void RunHeroScan()
     char* text = g_heroScan->text;
     const size_t cap = sizeof(g_heroScan->text);
     size_t pos = ScanAppend(text, cap, 0,
-        "=== TBH hero diagnostics (read-only) ===\r\n"
-        "Candidate labels are inferred from the dump and require runtime confirmation.\r\n\r\n");
+        "=== TBH hero diagnostics (read-only) ===\r\n\r\n");
 
     void* stageClass = FindClass(g_domain, "TaskbarHero", "StageManager");
     if (!stageClass) stageClass = FindClass(g_domain, "", "StageManager");
@@ -3937,6 +3876,8 @@ static void RunHeroScan()
         return;
     }
 
+    // All eight named offsets are confirmed against the Unit property getters; the
+    // remaining ObscuredFloats on Unit have no confirmed meaning yet.
     static const struct { const char* name; size_t offset; } kStats[] =
     {
         { "AttackDamage", 0x104 }, { "AttackSpeed", 0x118 },
@@ -3944,19 +3885,7 @@ static void RunHeroScan()
         { "MoveSpeed", 0x154 }, { "CriticalChance", 0x168 },
         { "CriticalDamage", 0x17C }, { "CooldownReduction", 0x190 },
         { "Unknown_1A4", 0x1A4 }, { "Unknown_1B8", 0x1B8 },
-        { "SkillRangeExpansion", 0x1CC }, { "FireResistance", 0x1E0 },
-    };
-    static const struct { const char* name; const char* method; float displayScale; } kGetters[] =
-    {
-        { "Attack Damage", "gqg", 1.0f },
-        { "Attack Speed", "gmv", 1.0f },
-        { "Armor", "gqh", 1.0f },
-        { "Move Speed", "gqi", 100.0f },
-        { "Max HP", "gqj", 1.0f },
-        { "Critical Chance", "gqk", 100.0f },
-        { "Critical Damage", "gql", 100.0f },
-        { "Cooldown Reduction", "gqm", 100.0f },
-        { "Cast Speed", "gqn", 1.0f },
+        { "Unknown_1CC", 0x1CC }, { "Unknown_1E0", 0x1E0 },
     };
 
     for (int32_t i = 0; i < count; ++i)
@@ -3973,29 +3902,10 @@ static void RunHeroScan()
         pos = ScanAppend(text, cap, pos, "\r\nHERO[%d] (UI Hero %d) object=0x%llX class=%s isHero=%d\r\n",
             i, i + 1, (unsigned long long)hero, className ? className : "?", isHero ? 1 : 0);
 
-        float runtimeAttackDamage = 0.0f;
-        float runtimeAttackSpeed = 0.0f;
-        InvokeFloat0(hero, "gqg", runtimeAttackDamage);
-        InvokeFloat0(hero, "gmv", runtimeAttackSpeed);
         for (const auto& stat : kStats)
             pos = ScanAppend(text, cap, pos, "  field %-26s +0x%03llX decrypt=%.6g fake=%.6g\r\n",
                 stat.name, (unsigned long long)stat.offset, ReadObscuredFloat(hero, stat.offset),
                 ReadObscuredFloatFake(hero, stat.offset));
-        pos = ScanAppend(text, cap, pos, "  -- Unit runtime getters --\r\n");
-        for (const auto& getter : kGetters)
-        {
-            float value = 0.0f;
-            bool ok = InvokeFloat0(hero, getter.method, value);
-            pos = ScanAppend(text, cap, pos, "  runtime %-26s %s = %s%.6g (display %.6g)\r\n",
-                getter.name, getter.method, ok ? "" : "unresolved/", value, value * getter.displayScale);
-        }
-        pos = ScanAppend(text, cap, pos, "  runtime BasicAttackDPS formula = %.6g\r\n",
-            runtimeAttackDamage * runtimeAttackSpeed);
-        float grfOrigin = 0.0f;
-        bool hasGrfOrigin = InvokeDamageInfoOrigin0(hero, "grf", grfOrigin);
-        pos = ScanAppend(text, cap, pos, "  damage payload Unit.grf OriginDamage = %s%.6g\r\n",
-            hasGrfOrigin ? "" : "unresolved/", grfOrigin);
-
         void* healthField = FindFieldOnClassOrParents(heroClass, "UnitHealthController");
         void* health = nullptr;
         if (healthField) il2cpp_field_get_value(hero, healthField, &health);
@@ -4008,55 +3918,11 @@ static void RunHeroScan()
                 *reinterpret_cast<float*>(hp + 0x38), *reinterpret_cast<float*>(hp + 0x3C),
                 *reinterpret_cast<float*>(hp + 0x40), *reinterpret_cast<float*>(hp + 0x44),
                 *reinterpret_cast<float*>(hp + 0x48), *reinterpret_cast<float*>(hp + 0x4C));
-            float gtp = 0.0f, gtq = 0.0f;
-            bool hasGtp = InvokeFloat0(health, "gtp", gtp);
-            bool hasGtq = InvokeFloat0(health, "gtq", gtq);
-            pos = ScanAppend(text, cap, pos, "  HP getters: gtp=%s%.6g gtq=%s%.6g\r\n",
-                hasGtp ? "" : "unresolved/", gtp, hasGtq ? "" : "unresolved/", gtq);
-            pos = ScanAppend(text, cap, pos,
-                "  CONFIRMED Current HP: controller+0x40 = %.6g | Max HP: controller+0x4C = %.6g\r\n",
-                *reinterpret_cast<float*>(hp + 0x40), *reinterpret_cast<float*>(hp + 0x4C));
         }
 
-        void* cache = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(hero) + 0x3A0);
-        pos = ScanAppend(text, cap, pos, "  heroCache(+0x3A0)=0x%llX", (unsigned long long)cache);
-        if (cache)
-        {
-            float jjeOrigin = 0.0f, jjdOrigin = 0.0f;
-            bool hasJjeOrigin = InvokeCachedDamageInfoOrigin("jje", cache, jjeOrigin);
-            bool hasJjdOrigin = InvokeCachedDamageInfoOrigin("jjd", cache, jjdOrigin);
-            pos = ScanAppend(text, cap, pos,
-                "  cached damage payloads: uh.jje OriginDamage=%s%.6g | uh.jjd OriginDamage=%s%.6g\r\n",
-                hasJjeOrigin ? "" : "unresolved/", jjeOrigin, hasJjdOrigin ? "" : "unresolved/", jjdOrigin);
-            pos = ScanAppend(text, cap, pos,
-                " level candidates decrypt/fake: +CC=%d/%d +DC=%d/%d +EC=%d/%d +FC=%d/%d +138=%d/%d\r\n",
-                ReadObscuredInt(cache, 0xCC), ReadObscuredIntFake(cache, 0xCC),
-                ReadObscuredInt(cache, 0xDC), ReadObscuredIntFake(cache, 0xDC),
-                ReadObscuredInt(cache, 0xEC), ReadObscuredIntFake(cache, 0xEC),
-                ReadObscuredInt(cache, 0xFC), ReadObscuredIntFake(cache, 0xFC),
-                ReadObscuredInt(cache, 0x138), ReadObscuredIntFake(cache, 0x138));
-            pos = ScanAppend(text, cap, pos, "  CONFIRMED Level candidate: cache+0xCC fakeValue = %d\r\n",
-                ReadObscuredIntFake(cache, 0xCC));
-        }
-        else
-            pos = ScanAppend(text, cap, pos, "\r\n");
-
-        void* heroInfo = cache ? *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(cache) + 0x30) : nullptr;
-        if (heroInfo)
-        {
-            uint8_t* info = reinterpret_cast<uint8_t*>(heroInfo);
-            pos = ScanAppend(text, cap, pos,
-                "  HeroInfoData=0x%llX base ints: ATK=%d AttackSpeed=%d CastSpeed=%d CritChance=%d CritDamage=%d CDR=%d MaxHP=%d Armor=%d MoveSpeed=%d\r\n",
-                (unsigned long long)heroInfo,
-                *reinterpret_cast<int32_t*>(info + 0x58), *reinterpret_cast<int32_t*>(info + 0x5C),
-                *reinterpret_cast<int32_t*>(info + 0x60), *reinterpret_cast<int32_t*>(info + 0x64),
-                *reinterpret_cast<int32_t*>(info + 0x68), *reinterpret_cast<int32_t*>(info + 0x6C),
-                *reinterpret_cast<int32_t*>(info + 0x70), *reinterpret_cast<int32_t*>(info + 0x74),
-                *reinterpret_cast<int32_t*>(info + 0x78));
-        }
     }
 
-    pos = ScanAppend(text, cap, pos, "\r\nScan complete. Compare candidates with the in-game hero panel.\r\n");
+    pos = ScanAppend(text, cap, pos, "\r\nScan complete.\r\n");
     g_heroScan->length = static_cast<int32_t>(pos < cap ? pos : cap - 1);
     g_heroScan->done = 1;
 }
