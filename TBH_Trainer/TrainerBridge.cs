@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal sealed class TrainerBridge : IDisposable
 {
     private const string MapName = "TBHTrainerShared";
-    private const int    MapSize = 120;
+    private const int    MapSize = 100;
     private const int    Magic   = 0x31484254; // "TBH1"
 
     private const long OffMagic        = 0x00;
@@ -34,14 +34,9 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffRvaAddItem   = 0x4C;
     private const long OffRvaItemInfo  = 0x50;
     private const long OffRvaSlotUid   = 0x54;
-    private const long OffRvaSlotObj   = 0x58;
-    private const long OffRvaSlotCtx   = 0x5C;
-    private const long OffRvaSlotAction = 0x60;
-    private const long OffRvaStashCache = 0x64;
-    private const long OffRvaBoxCount = 0x68;
-    private const long OffTrainerPaused = 0x6C;
-    private const long OffRvaStashSortAll = 0x70;
-    private const long OffRvaSlotMove = 0x74;
+    private const long OffRvaStashCache = 0x58;
+    private const long OffRvaBoxCount = 0x5C;
+    private const long OffTrainerPaused = 0x60;
 
     private MemoryMappedFile?         _mmf;
     private MemoryMappedViewAccessor? _view;
@@ -85,13 +80,8 @@ internal sealed class TrainerBridge : IDisposable
         _view.Write(OffRvaAddItem,  api ? profile.ItemAddRva : 0);
         _view.Write(OffRvaItemInfo, api ? profile.ItemInfoRva : 0);
         _view.Write(OffRvaSlotUid,   api ? profile.SlotUidRva : 0);
-        _view.Write(OffRvaSlotObj,   api ? profile.SlotObjRva : 0);
-        _view.Write(OffRvaSlotCtx,   api ? profile.SlotCtxRva : 0);
-        _view.Write(OffRvaSlotAction, api ? profile.SlotActionRva : 0);
         _view.Write(OffRvaStashCache, api ? profile.StashCacheRva : 0);
         _view.Write(OffRvaBoxCount, api ? profile.BoxCountRva : 0);
-        _view.Write(OffRvaStashSortAll, api ? profile.StashSortAllRva : 0);
-        _view.Write(OffRvaSlotMove, api ? profile.SlotMoveRva : 0);
         _view.Write(OffTrainerPaused, 0);   // (re)connected: resume
     }
 

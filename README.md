@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v1.5.0
+**เวอร์ชัน trainer:** v1.5.1
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6, 1.2.7 และ **1.2.8** (build 25454993, profile `V128`: RVA ใหม่ layout เหมือน 1.2.7)
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
@@ -71,7 +71,7 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 | God mode (เติม HP ทุก ~33 ms + lock Armor) | ✅ |
 | Item spawn + Export catalog | ✅ |
 | Scan items (อ่าน inventory + ช่อง Stash ที่ปลดล็อกแล้ว, 1.2.6) | ✅ |
-| Auto Stash: ย้ายของ Lv90+ จากกระเป๋าเข้า Stash (1.2.6) | ✅ |
+| Auto Stash / Sort Stash / Organize Stash | 🗑️ ลบออกแล้วใน v1.5.1 |
 | Auto เปิดกล่อง: เจอกล่อง → รอ 2 วิ → เปิดทีละกล่องทุก 2 วิ (1.2.6) | ✅ |
 | ปุ่ม Launch Game (เปิดเกมผ่าน Steam) | ✅ |
 | Hero EXP on Kill | 🗑️ ลบออกแล้ว |
@@ -101,6 +101,13 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 ปุ่ม **Max stats (all heroes)** ตั้งทั้ง 8 ค่าให้ฮีโร่ทั้ง 3 ช่องพร้อมกัน: Attack Damage 1,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v1.5.1
+
+- ถอดฟีเจอร์จัดของออกทั้งหมดตามที่สั่ง: **Organize Stash (7 pages)**, checkbox **Organize after opening boxes**, **Sort Stash** และ **Auto Stash (Lv90+)** — ลบทั้งปุ่มและโค้ดใน hook (slot move API, organizer, UI click, auto-stash job)
+- เหลือ **Auto open boxes (every 2s)** ไว้อย่างเดียวในกลุ่มนั้น
+- `SharedState` เหลือ 100 byte: ตัด `rvaSlotObj` / `rvaSlotCtx` / `rvaSlotAction` / `rvaStashSortAll` / `rvaSlotMove` ที่ไม่มีใครใช้แล้ว (ต้องใช้ hook กับ trainer เวอร์ชันเดียวกัน)
+- คำสั่งที่เหลือของ hook: 0 scan, 7 layout dump, 3/4/5/6/8-11/22/23 hero stat lock, 12 one-hit kill, 13 god mode, 14 inventory scan, 16 auto open boxes, 19 stash list (read-only), 24 max stats
 
 ## เปลี่ยนแปลงใน v1.5.0
 

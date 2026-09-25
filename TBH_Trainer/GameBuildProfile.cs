@@ -50,24 +50,12 @@ internal sealed class GameBuildProfile
 
     /// <summary>rz.ikf(ESlotType, int) -> uid of the item in a slot (inventory scan / auto stash). 0 = n/a.</summary>
     public int SlotUidRva { get; init; }
-    /// <summary>rz.ikc(ESlotType, int) -> ItemSlot UI object.</summary>
-    public int SlotObjRva { get; init; }
-    /// <summary>SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext.</summary>
-    public int SlotCtxRva { get; init; }
-    /// <summary>SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext) — executes a slot move.</summary>
-    public int SlotActionRva { get; init; }
 
     /// <summary>static Stash.kcc(int) -> StashCache (per-slot unlock state; stash size differs per player).</summary>
     public int StashCacheRva { get; init; }
 
     /// <summary>static int wh.uy.jif(EBoxType, EContentType) -> unopened stage boxes (auto open boxes).</summary>
     public int BoxCountRva { get; init; }
-
-    /// <summary>static void wh.Stash.kcb(): the stash Sort button's handler, sorts every page. 0 = press the UI button instead.</summary>
-    public int StashSortAllRva { get; init; }
-
-    /// <summary>rz.ije(MoveRequest, Action&lt;MoveResult&gt;): drag &amp; drop between slots (stash organizer).</summary>
-    public int SlotMoveRva { get; init; }
 
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
@@ -204,9 +192,6 @@ internal sealed class GameBuildProfile
         // Slot API (the path the game uses when the player clicks a slot). rz has many cloned
         // accessors; these are the ones SlotInteractionManager actually calls.
         SlotUidRva = 0x8E86A0,      // rz.ikf(ESlotType, int) -> ulong uid
-        SlotObjRva = 0x8E7D00,      // rz.ikc(ESlotType, int) -> ItemSlot
-        SlotCtxRva = 0x8F0830,      // SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext
-        SlotActionRva = 0x8F0A90,   // SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext)
         StashCacheRva = 0x9B35F0,   // wh.Stash.kcc(int) -> StashCache
         BoxCountRva   = 0x9638A0,   // wh.uy.jif(EBoxType, EContentType) -> box count (used by StageBox click)
         StashNamespace = "wh",
@@ -245,12 +230,8 @@ internal sealed class GameBuildProfile
         ItemAddRva = 0x96E5E0,      // wh.vc.jml(int itemKey, ulong uid, EItemGetSourceType, int count, bool)
         ItemInfoRva = 0x96F760,     // wh.vc.jmv(int itemKey) -> ItemInfoData (clone of xj)
         SlotUidRva = 0x8DC860,      // rz.ikg(ESlotType, int) -> ulong uid
-        SlotObjRva = 0x8DBEC0,      // rz.ikd(ESlotType, int) -> ItemSlot
-        SlotCtxRva = 0x8E2700,      // SlotInteractionManager.ink(rm, bool, ulong) -> SlotActionContext
-        SlotActionRva = 0x8E2960,   // SlotInteractionManager.inn(SlotActionResult, rm, SlotActionContext)
         StashCacheRva = 0x9AC0A0,   // wh.Stash.kcd(int) -> StashCache
         BoxCountRva   = 0x957EC0,   // wh.uy.jig(EBoxType, EContentType) -> box count
-        StashSortAllRva = 0x9AB7E0, // wh.Stash.kcb() -> kcc(page) for every page
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,
@@ -286,13 +267,8 @@ internal sealed class GameBuildProfile
         ItemAddRva = 0x97C2F0,      // wh.vc.jml (25 call sites; clone mjq has none)
         ItemInfoRva = 0x97D310,     // wh.vc.jmv (identical 260-byte clones: cbu/kdo/hwc/hgc)
         SlotUidRva = 0x8F4000,      // rz.ikg
-        SlotObjRva = 0x8F3660,      // rz.ikd
-        SlotCtxRva = 0x8FC4C0,      // SlotInteractionManager.ink
-        SlotActionRva = 0x8FC720,   // SlotInteractionManager.inn
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
-        BoxCountRva   = 0x96D650,   // wh.uy.jig
-        StashSortAllRva = 0x9C3180, // wh.Stash.kcb() (no direct callers: bound to the Sort button)
-        SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
+        BoxCountRva   = 0x96D650,   // wh.uy.jig(EBoxType, EContentType) -> box count
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,

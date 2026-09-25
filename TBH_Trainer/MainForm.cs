@@ -44,10 +44,6 @@ internal sealed class MainForm : Form
     private Button _btnSpawnItem = null!;
     private Button _btnScanItems = null!;
     private Button _btnExportCatalog = null!;
-    private Button _btnAutoStash = null!;
-    private Button _btnSortStash = null!;
-    private Button _btnOrganizeStash = null!;
-    private CheckBox _chkAutoOrganize = null!;
     private Label _lblSpawnStatus = null!;
     private ItemScanBridge? _scanBridge;
     private DateTime _lastSpawnClick = DateTime.MinValue;
@@ -368,37 +364,15 @@ internal sealed class MainForm : Form
             MaximumSize = new Size(150, 34),
             ForeColor = TextDim, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
         };
-        // Moves every Lv90+ item from the hero bag into the stash (same calls as a player click).
-        _btnAutoStash = MakeBtn($"Auto Stash (Lv{AutoStashMinLevel}+)", 15, 132, 170);
-        _btnAutoStash.Enabled = false;
-        _btnAutoStash.Click += OnAutoStash;
-
         // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
         _chkAutoOpenBoxes = new CheckBox
         {
-            Text = "Auto open boxes (every 2s)", Location = new Point(200, 136), AutoSize = true,
+            Text = "Auto open boxes (every 2s)", Location = new Point(15, 136), AutoSize = true,
             ForeColor = TextMain, Checked = true
         };
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
 
-        // Presses the game's own stash Sort button.
-        _btnSortStash = MakeBtn("Sort Stash", 405, 132, 120);
-        _btnSortStash.Enabled = false;
-        _btnSortStash.Click += OnSortStash;
-
-        // Stash pages by category: 1 soul stones, 2 decorations, 3 engravings, 4 inscriptions,
-        // 5 weapons, 6 armor, 7 accessories (bag Lv90+ gear and those materials are moved in first).
-        _btnOrganizeStash = MakeBtn("Organize Stash (7 pages)", 15, 170, 210);
-        _btnOrganizeStash.Enabled = false;
-        _btnOrganizeStash.Click += OnOrganizeStash;
-        _chkAutoOrganize = new CheckBox
-        {
-            Text = "Organize after opening boxes", Location = new Point(235, 174), AutoSize = true,
-            ForeColor = TextMain, Checked = true
-        };
-        _chkAutoOrganize.CheckedChanged += (_, _) => ApplyCombatToggle(21, _chkAutoOrganize.Checked);
-
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _btnAutoStash, _chkAutoOpenBoxes, _btnSortStash, _btnOrganizeStash, _chkAutoOrganize, _lblSpawnStatus });
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -846,9 +820,6 @@ internal sealed class MainForm : Form
         _btnSpawnItem.Enabled = enabled;
         _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
         _btnExportCatalog.Enabled = enabled;
-        _btnAutoStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
-        _btnSortStash.Enabled = enabled && _buildProfile.SlotActionRva > 0;
-        _btnOrganizeStash.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
     }
 
     private void OnExportCatalog(object? sender, EventArgs e)
@@ -972,7 +943,6 @@ internal sealed class MainForm : Form
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
         if (_chkGodMode.Checked) ApplyCombatToggle(13, true);
         if (_chkAutoOpenBoxes.Checked && _buildProfile.BoxCountRva > 0) ApplyCombatToggle(16, true);
-        if (_chkAutoOrganize.Checked && _buildProfile.SlotMoveRva > 0) ApplyCombatToggle(21, true);
     }
 
     /// <summary>
@@ -1251,80 +1221,6 @@ internal sealed class MainForm : Form
         finally
         {
             _btnScanItems.Enabled = true;
-        }
-    }
-
-    /// <summary>Gear at this level or above is moved to the stash (current max levels: 90 and 100).</summary>
-    private const int AutoStashMinLevel = 90;
-
-    private void OnAutoStash(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Auto stash")) return;
-        if (!EnsureSpeedReady()) return;
-        _heroScanBridge ??= new HeroScanBridge();
-        if (!_heroScanBridge.TryConnect(3000))
-        {
-            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
-            return;
-        }
-        _btnAutoStash.Enabled = false;
-        try
-        {
-            Log($"--- Auto stash: moving Lv{AutoStashMinLevel}+ items from the bag to the stash ---");
-            string? result = _heroScanBridge.WriteValue(15, 0, AutoStashMinLevel, timeoutMs: 35000);
-            Log(result?.Trim() ?? "ERROR: auto stash timed out.");
-            RunInventoryScan();
-        }
-        finally
-        {
-            _btnAutoStash.Enabled = true;
-        }
-    }
-
-    private void OnOrganizeStash(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Organize stash")) return;
-        if (!EnsureSpeedReady()) return;
-        _heroScanBridge ??= new HeroScanBridge();
-        if (!_heroScanBridge.TryConnect(3000))
-        {
-            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
-            return;
-        }
-        _btnOrganizeStash.Enabled = false;
-        try
-        {
-            Log("--- Organize stash: 1 soul stones, 2 decorations, 3 engravings, 4 inscriptions, 5 weapons, 6 armor, 7 accessories ---");
-            string? result = _heroScanBridge.WriteValue(20, 0, 1f, timeoutMs: 190000);
-            Log(result?.Trim() ?? "ERROR: organize timed out.");
-        }
-        finally
-        {
-            _btnOrganizeStash.Enabled = true;
-        }
-    }
-
-    private void OnSortStash(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Stash sort")) return;
-        if (!EnsureSpeedReady()) return;
-        _heroScanBridge ??= new HeroScanBridge();
-        if (!_heroScanBridge.TryConnect(3000))
-        {
-            Log("ERROR: hook channel missing — restart the game with the newest TBHHook.dll.");
-            return;
-        }
-        _btnSortStash.Enabled = false;
-        try
-        {
-            Log("--- Stash sort: pressing the game's Sort button ---");
-            string? result = _heroScanBridge.WriteValue(17, 0, 1f, timeoutMs: 8000);
-            Log(result?.Trim() ?? "ERROR: stash sort timed out.");
-            RunInventoryScan();
-        }
-        finally
-        {
-            _btnSortStash.Enabled = true;
         }
     }
 

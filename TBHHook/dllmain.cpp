@@ -42,22 +42,17 @@ struct SharedState
     int32_t rvaAddItem;    // 0x4C  ue.ti.blk (1.00.09) / we.va.jiv (1.2.4)
     int32_t rvaItemInfo;   // 0x50  static ItemInfoData lookup(int itemKey), e.g. we.va.jjc (1.2.4)
     int32_t rvaSlotUid;    // 0x54  rz.ikf(ESlotType, int) -> item uid in that slot (1.2.6)
-    int32_t rvaSlotObj;    // 0x58  rz.ikc(ESlotType, int) -> ItemSlot UI object
-    int32_t rvaSlotCtx;    // 0x5C  SlotInteractionManager.inj(rm, bool, ulong) -> SlotActionContext
-    int32_t rvaSlotAction; // 0x60  SlotInteractionManager.inm(SlotActionResult, rm, SlotActionContext)
-    int32_t rvaStashCache; // 0x64  static Stash.kcc(int index) -> StashCache (unlock state per slot)
-    int32_t rvaBoxCount;   // 0x68  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
-    int32_t trainerPaused; // 0x6C  1 = trainer disconnected: stop every call into the game
-    int32_t rvaStashSortAll; // 0x70  static wh.Stash.kcb() -> sorts every stash page (Sort button)
-    int32_t rvaSlotMove;   // 0x74  rz.ije(MoveRequest, Action<MoveResult>) -> player drag & drop
+    int32_t rvaStashCache; // 0x58  static Stash.kcc(int index) -> StashCache (unlock state per slot)
+    int32_t rvaBoxCount;   // 0x5C  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
+    int32_t trainerPaused; // 0x60  1 = trainer disconnected: stop every call into the game
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 120, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 100, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 120;
+static const int      kMapSize = 100;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -2329,14 +2324,13 @@ static bool StashSlotStats(int32_t* used, int32_t* unlocked, int32_t* total, boo
 }
 
 // ---------------------------------------------------------------------------------
-// Stash organizer categories (page per category, 49 slots per page).
+// Item categories used by the read-only stash listing:
 //   0 soul stones  1 decorations  2 engravings  3 inscriptions
 //   4 main + sub weapons  5 helmet/armor/gloves/boots  6 amulet/earring/ring/bracer
 // ItemInfoData: ItemKey +0x30, ITEMTYPE +0x34, GRADE +0x38, PARTS +0x40, Level +0x6C,
 // MaxStack +0x88. Item (wh.vc.va): ItemInfoData +0x10, MaterialInfoData +0x18 (type +0x34).
 // ---------------------------------------------------------------------------------
-static const int32_t kStashPageSize = 49;
-static const int32_t kOrganizePages = 7;
+static const int32_t kStashPageSize = 49;   // stash page size, for the listing's page number
 
 struct SlotItemInfo
 {
@@ -2382,7 +2376,7 @@ static bool ReadSlotItem(uint64_t uid, SlotItemInfo* out)
     return true;
 }
 
-// Command 19: list every used stash slot with its organizer category (read-only).
+// Command 19: list every used stash slot with its category (read-only).
 static void RunStashList()
 {
     char* text = g_heroScan->text;
@@ -2483,100 +2477,6 @@ typedef void (*SimUpdateFn)(void* self, const void* method);
 static SimUpdateFn   g_origSimUpdate   = nullptr;
 static bool          g_simHookTried    = false;
 
-// Auto-stash job state (worker thread queues, main thread executes).
-static volatile LONG g_stashJobActive  = 0;
-static int32_t       g_stashJobMinLevel = 90;
-static int32_t       g_stashJobIndex   = 0;
-static int32_t       g_stashJobMoved   = 0;
-static int32_t       g_stashJobFailed  = 0;
-static int32_t       g_stashJobFrame   = 0;
-static char          g_stashJobError[128] = {};
-
-struct SlotActionResultNative   // TaskbarHero.SlotActionResult
-{
-    int32_t destinationSlotType;
-    int32_t action;
-    bool    allowTabSwitch;
-};
-
-static const int32_t kActionMoveToStash = 4; // ESlotAction.MoveToStash
-
-static void* MethodFromSharedRva(int32_t rva, int argCount)
-{
-    return rva > 0 ? FindMethodByRva(static_cast<uintptr_t>(rva), argCount, nullptr) : nullptr;
-}
-
-// One Lv>=N inventory item per call: rz.ikc -> ItemSlot, SlotInteractionManager.inj ->
-// context, then inm with Destination = STASH / Action = MoveToStash — the same calls the
-// game makes when the player moves a slot. Returns false when the scan is finished.
-static bool StashJobStep(void* sim)
-{
-    static void* s_slotObj = nullptr;
-    static void* s_ctx = nullptr;
-    static void* s_action = nullptr;
-    if (!s_slotObj) s_slotObj = MethodFromSharedRva(g_shared ? g_shared->rvaSlotObj : 0, 2);
-    if (!s_ctx)     s_ctx     = MethodFromSharedRva(g_shared ? g_shared->rvaSlotCtx : 0, 3);
-    if (!s_action)  s_action  = MethodFromSharedRva(g_shared ? g_shared->rvaSlotAction : 0, 3);
-
-    void* rz = nullptr;
-    void* uidMethod = nullptr;
-    if (!s_slotObj || !s_ctx || !s_action || !ResolveSlotApi(&rz, &uidMethod))
-    {
-        strcpy_s(g_stashJobError, "slot API not resolved on this build");
-        return false;
-    }
-
-    for (; g_stashJobIndex < kMaxInventorySlots; ++g_stashJobIndex)
-    {
-        int32_t index = g_stashJobIndex;
-        bool failed = false;
-        uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, index, &failed);
-        if (failed) return false;          // past the last inventory slot
-        if (!uid) continue;
-
-        void* item = ItemByUid(uid);
-        void* info = item ? *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(item) + 0x10) : nullptr;
-        if (!info) continue;
-        int32_t level = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(info) + 0x6C);
-        if (level < g_stashJobMinLevel) continue;
-
-        int32_t slotType = kSlotInventory;
-        void* exc = nullptr;
-        void* argsSlot[2] = { &slotType, &index };
-        void* slot = il2cpp_runtime_invoke(s_slotObj, rz, argsSlot, &exc);
-        if (exc || !slot)
-        {
-            ++g_stashJobFailed;
-            strcpy_s(g_stashJobError, "inventory slot UI not found (open the HERO bag)");
-            ++g_stashJobIndex;
-            return true;
-        }
-
-        bool flag = false;
-        void* argsCtx[3] = { slot, &flag, &uid };
-        exc = nullptr;
-        void* ctxBoxed = il2cpp_runtime_invoke(s_ctx, sim, argsCtx, &exc);
-        if (exc || !ctxBoxed)
-        {
-            ++g_stashJobFailed;
-            strcpy_s(g_stashJobError, "could not build the slot action context");
-            ++g_stashJobIndex;
-            return true;
-        }
-
-        SlotActionResultNative result = { kSlotStash, kActionMoveToStash, true };
-        void* argsMove[3] = { &result, slot, reinterpret_cast<uint8_t*>(ctxBoxed) + 0x10 };
-        exc = nullptr;
-        il2cpp_runtime_invoke(s_action, sim, argsMove, &exc);
-        if (exc) { ++g_stashJobFailed; strcpy_s(g_stashJobError, "move call threw an exception"); }
-        else ++g_stashJobMoved;
-
-        ++g_stashJobIndex;
-        return true;                       // one item per step; let the game settle
-    }
-    return false;
-}
-
 // ---------------------------------------------------------------------------------
 // Auto open boxes: every stage box (StageBox) with unopened boxes is left-clicked through
 // its own click handler — the same call as a player click, so the game's checks
@@ -2657,11 +2557,6 @@ static int32_t BoxCount(void* stageBox)
     return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
 }
 
-static volatile bool g_autoOrganize = false;   // organize the stash after boxes are opened
-static ULONGLONG     g_orgDueAt = 0;
-static volatile LONG g_orgAutoRuns = 0;
-static volatile LONG g_orgRequest = 0;   // worker asks the main thread to start a run
-static volatile LONG g_orgBeginFailed = 0;
 static ULONGLONG g_boxNextCheck  = 0;
 static ULONGLONG g_boxReadyAt    = 0;      // 0 = no box seen yet
 static ULONGLONG g_boxPauseUntil = 0;
@@ -2722,534 +2617,18 @@ static void BoxJobTick()
     if (!exc)
     {
         InterlockedIncrement(&g_boxOpened);
-        g_orgDueAt = now + 4000;   // organize the stash once no box was opened for 4 s
     }
     g_boxLastTarget = target;
     g_boxLastCount = count;
     g_boxReadyAt = now + kBoxOpenIntervalMs;                                  // next one in 2s
 }
 
-static void* volatile g_stashJobSim = nullptr;   // SlotInteractionManager instance for the job
-
-// ---------------------------------------------------------------------------------
-// UI button press (main thread): finds a UI panel by class, reads one of its ButtonBase
-// fields, and invokes the underlying UnityEngine.UI.Button.onClick — exactly what the
-// game's own click does, so its checks and animations still run. Resolved by stable
-// field names (SortingButton / button), not by obfuscated method names.
-// ---------------------------------------------------------------------------------
-static volatile LONG g_uiClickPending = 0;       // 1 = queued, 0 = done
-static const char*   g_uiClickClass   = nullptr; // e.g. "UI_Stash"
-static const char*   g_uiClickField   = nullptr; // e.g. "SortingButton"
-static int32_t       g_uiClickResult  = 0;       // 1 ok, <0 error code
-static char          g_uiClickError[128] = {};
-
-static void* FindFieldOnHierarchy(void* klass, const char* name)
-{
-    for (void* k = klass; k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
-    {
-        void* f = il2cpp_class_get_field_from_name(k, name);
-        if (f) return f;
-        if (!il2cpp_class_get_parent) break;
-    }
-    return nullptr;
-}
-
-static void* FindMethodOnHierarchy(void* klass, const char* name, int argc)
-{
-    for (void* k = klass; k; k = il2cpp_class_get_parent ? il2cpp_class_get_parent(k) : nullptr)
-    {
-        void* m = il2cpp_class_get_method_from_name(k, name, argc);
-        if (m) return m;
-        if (!il2cpp_class_get_parent) break;
-    }
-    return nullptr;
-}
-
-static bool g_uiClickSortedDirect = false;
-
-static void UiClickStep()
-{
-    g_uiClickResult = -1;
-    g_uiClickSortedDirect = false;
-
-    // Stash sort: call the Sort button's own static handler (wh.Stash.kcb on 1.2.7/1.2.8),
-    // which sorts every page and works without the stash window having been opened.
-    static void* s_sortAll = nullptr;
-    if (!s_sortAll && g_shared && g_shared->rvaStashSortAll > 0 && Streq(g_uiClickField, "SortingButton"))
-        s_sortAll = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaStashSortAll), 0, nullptr);
-    if (s_sortAll && Streq(g_uiClickField, "SortingButton"))
-    {
-        void* exc = nullptr;
-        il2cpp_runtime_invoke(s_sortAll, nullptr, nullptr, &exc);
-        if (exc)
-        {
-            strcpy_s(g_uiClickError, "the game's sort threw an exception");
-            g_uiClickResult = -5;
-            return;
-        }
-        g_uiClickSortedDirect = true;
-        g_uiClickResult = 1;
-        return;
-    }
-
-    void* panelClass = FindClass(g_domain, "TaskbarHero", g_uiClickClass);
-    void* objClass = FindClass(g_domain, "UnityEngine", "Object");
-    void* findAll = objClass ? il2cpp_class_get_method_from_name(objClass, "FindObjectsOfType", 2) : nullptr;
-    if (!panelClass || !findAll || !il2cpp_class_get_type || !il2cpp_type_get_object)
-    {
-        strcpy_s(g_uiClickError, "UI class or FindObjectsOfType not found");
-        return;
-    }
-    void* typeObj = il2cpp_type_get_object(il2cpp_class_get_type(panelClass));
-    bool includeInactive = true;
-    void* args[2] = { typeObj, &includeInactive };
-    void* exc = nullptr;
-    void* arr = il2cpp_runtime_invoke(findAll, nullptr, args, &exc);
-    if (exc || !arr || il2cpp_array_length(arr) == 0)
-    {
-        strcpy_s(g_uiClickError, "panel not found (open it once in game)");
-        g_uiClickResult = -2;
-        return;
-    }
-    void* panel = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
-
-    void* btnField = FindFieldOnHierarchy(il2cpp_object_get_class(panel), g_uiClickField);
-    void* buttonBase = nullptr;
-    if (btnField) il2cpp_field_get_value(panel, btnField, &buttonBase);
-    void* uiButtonField = buttonBase ? FindFieldOnHierarchy(il2cpp_object_get_class(buttonBase), "button") : nullptr;
-    void* uiButton = nullptr;
-    if (uiButtonField) il2cpp_field_get_value(buttonBase, uiButtonField, &uiButton);
-    if (!uiButton)
-    {
-        strcpy_s(g_uiClickError, "button object not found");
-        g_uiClickResult = -3;
-        return;
-    }
-    void* getOnClick = FindMethodOnHierarchy(il2cpp_object_get_class(uiButton), "get_onClick", 0);
-    exc = nullptr;
-    void* onClick = getOnClick ? il2cpp_runtime_invoke(getOnClick, uiButton, nullptr, &exc) : nullptr;
-    void* invoke = onClick ? FindMethodOnHierarchy(il2cpp_object_get_class(onClick), "Invoke", 0) : nullptr;
-    if (exc || !invoke)
-    {
-        strcpy_s(g_uiClickError, "onClick not available");
-        g_uiClickResult = -4;
-        return;
-    }
-    exc = nullptr;
-    il2cpp_runtime_invoke(invoke, onClick, nullptr, &exc);
-    if (exc)
-    {
-        strcpy_s(g_uiClickError, "the game's click handler threw an exception");
-        g_uiClickResult = -5;
-        return;
-    }
-    g_uiClickResult = 1;
-}
-
-// ---------------------------------------------------------------------------------
-// Slot moves: rz.ije(MoveRequest, Action<MoveResult>) is what SlotInteractionManager calls
-// when the player drags a slot onto another (DRAG = swap / stack onto the target).
-// ---------------------------------------------------------------------------------
-struct MoveRequestNative   // TaskbarHero.MoveRequest
-{
-    int32_t sourceType;
-    int32_t sourceIndex;
-    int32_t targetType;
-    int32_t targetIndex;
-    int32_t moveType;      // EMoveType.DRAG = 0
-    int32_t quantity;
-};
-
-static void* g_moveMethod = nullptr;
-static void* g_moveCbClass = nullptr;
-static void* g_moveCbMethod = nullptr;
-static void* g_moveCbTarget = nullptr;
-
-// Resolves rz.ije and a callback: SlotInteractionManager's own MoveResult handler (shows the
-// game's toast when a move is refused), the same kind of callback the drag & drop UI passes.
-static bool ResolveMoveApi()
-{
-    if (!g_moveMethod && g_shared && g_shared->rvaSlotMove > 0)
-        g_moveMethod = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaSlotMove), 2, nullptr);
-    if (!g_moveMethod || !il2cpp_method_get_param) return false;
-    if (!g_moveCbClass) g_moveCbClass = il2cpp_class_from_type(il2cpp_method_get_param(g_moveMethod, 1));
-    void* simClass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
-    if (!simClass || !g_moveCbClass) return false;
-    g_moveCbTarget = FindSingletonInstance(simClass);
-    if (!g_moveCbMethod)
-    {
-        // Prefer the handler that two obfuscated names share (toast-on-failure); else the first.
-        void* first = nullptr;
-        void* iter = nullptr;
-        void* m = nullptr;
-        void* candidates[8] = {};
-        int n = 0;
-        while ((m = il2cpp_class_get_methods(simClass, &iter)) != nullptr && n < 8)
-        {
-            if (il2cpp_method_get_param_count(m) != 1) continue;
-            char* tn = il2cpp_type_get_name(il2cpp_method_get_param(m, 0));
-            bool match = tn && StrContains(tn, "MoveResult");
-            if (tn && il2cpp_free) il2cpp_free(tn);
-            if (match) candidates[n++] = m;
-        }
-        for (int i = 0; i < n && !g_moveCbMethod; ++i)
-            for (int j = i + 1; j < n; ++j)
-                if (MethodPointer(candidates[i]) == MethodPointer(candidates[j])) { g_moveCbMethod = candidates[i]; break; }
-        if (!g_moveCbMethod && n > 0) g_moveCbMethod = candidates[0];
-        (void)first;
-    }
-    return g_moveMethod && g_moveCbMethod && g_moveCbTarget;
-}
-
-// Main thread only. Returns false if the call could not be made or threw.
-static bool MoveSlot(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t dstIndex, int32_t quantity)
-{
-    void* rz = nullptr;
-    void* uidMethod = nullptr;
-    if (!ResolveSlotApi(&rz, &uidMethod) || !ResolveMoveApi()) return false;
-
-    // A fresh delegate per move: it lives on this stack frame during the call, and the
-    // game keeps its own reference if it stores it.
-    void* cb = il2cpp_object_new(g_moveCbClass);
-    void* ctor = cb ? il2cpp_class_get_method_from_name(g_moveCbClass, ".ctor", 2) : nullptr;
-    if (!ctor) return false;
-    void* methodInfo = g_moveCbMethod;
-    void* ctorArgs[2] = { g_moveCbTarget, &methodInfo };
-    void* exc = nullptr;
-    il2cpp_runtime_invoke(ctor, cb, ctorArgs, &exc);
-    if (exc) return false;
-
-    MoveRequestNative req = { srcType, srcIndex, dstType, dstIndex, 0, quantity };
-    void* args[2] = { &req, cb };
-    exc = nullptr;
-    il2cpp_runtime_invoke(g_moveMethod, rz, args, &exc);
-    return exc == nullptr;
-}
-
 static bool InstallSimUpdateHook();
-
-// ---------------------------------------------------------------------------------
-// Stash organizer (main thread, one DRAG move per step):
-//   1. import: bag gear Lv90+ and bag soul stones / decorations / engravings / inscriptions
-//      go into free stash slots (their category page first)
-//   2. merge: same-key material stacks are dragged onto each other once (the game stacks
-//      up to MaxStack = 5 when there is room)
-//   3. layout: page 1..7 = categories 0..6 (see ReadSlotItem); within a page gear is ordered
-//      by part, grade (high first), level, key; materials by key. Items that don't fit their
-//      page, and uncategorized items, fill pages 8+ first, then any free slot.
-// Every item gets exactly one target slot; placing targets in slot order with swaps
-// converges in at most one move per item.
-// ---------------------------------------------------------------------------------
-static const int32_t kOrgMaxSlots = kMaxStashSlots;
-static volatile LONG g_orgActive = 0;
-static int32_t  g_orgPhase = 0;          // 0 import, 1 merge, 2 layout, 3 done
-static int32_t  g_orgFrame = 0;
-static int32_t  g_orgSlots = 0;          // stash slots that exist
-static bool     g_orgUnlocked[kOrgMaxSlots];
-static uint64_t g_orgTarget[kOrgMaxSlots];   // desired uid per slot (0 = empty)
-static bool     g_orgTargetBuilt = false;
-static int32_t  g_orgMoves = 0, g_orgFails = 0, g_orgImported = 0, g_orgMerged = 0;
-static int32_t  g_orgSteps = 0;
-static char     g_orgError[128] = {};
-static uint64_t g_orgStuck[64];
-static int32_t  g_orgStuckCount = 0;
-static uint64_t g_orgMergeTried[256];
-static int32_t  g_orgMergeTriedCount = 0;
-
-static bool OrgIsStuck(uint64_t uid)
-{
-    for (int32_t i = 0; i < g_orgStuckCount; ++i) if (g_orgStuck[i] == uid) return true;
-    return false;
-}
-
-static int32_t OrgSortRank(const SlotItemInfo& a)
-{
-    return a.itemType == 2 ? a.parts : 0;
-}
-
-static bool OrgLess(const SlotItemInfo& a, const SlotItemInfo& b)
-{
-    if (OrgSortRank(a) != OrgSortRank(b)) return OrgSortRank(a) < OrgSortRank(b);
-    if (a.itemType == 2)
-    {
-        if (a.grade != b.grade) return a.grade > b.grade;
-        if (a.level != b.level) return a.level > b.level;
-    }
-    if (a.key != b.key) return a.key < b.key;
-    return a.uid < b.uid;
-}
-
-static bool OrgSnapshot(void* rz, void* uidMethod, uint64_t* uids, SlotItemInfo* infos, int32_t* count)
-{
-    int32_t n = 0;
-    for (int32_t i = 0; i < g_orgSlots; ++i)
-    {
-        bool failed = false;
-        uids[i] = SlotUid(rz, uidMethod, kSlotStash, i, &failed);
-        if (failed) return false;
-        if (uids[i] && infos) ReadSlotItem(uids[i], &infos[n++]);
-    }
-    if (count) *count = n;
-    return true;
-}
-
-static void OrgBuildTargets(SlotItemInfo* items, int32_t n)
-{
-    // simple insertion sort by (category page, order)
-    for (int32_t i = 1; i < n; ++i)
-    {
-        SlotItemInfo v = items[i];
-        int32_t j = i - 1;
-        while (j >= 0)
-        {
-            int32_t ca = items[j].category < 0 ? 99 : items[j].category;
-            int32_t cb = v.category < 0 ? 99 : v.category;
-            bool greater = ca != cb ? ca > cb : OrgLess(v, items[j]);
-            if (!greater) break;
-            items[j + 1] = items[j];
-            --j;
-        }
-        items[j + 1] = v;
-    }
-    for (int32_t i = 0; i < g_orgSlots; ++i) g_orgTarget[i] = 0;
-
-    static uint64_t leftovers[kOrgMaxSlots];
-    int32_t nLeft = 0;
-    int32_t next[kOrganizePages] = {};
-    for (int32_t i = 0; i < n; ++i)
-    {
-        const SlotItemInfo& it = items[i];
-        if (OrgIsStuck(it.uid)) continue;
-        bool placed = false;
-        if (it.category >= 0 && it.category < kOrganizePages)
-        {
-            int32_t page = it.category;
-            for (int32_t& k = next[page]; k < kStashPageSize && !placed; ++k)
-            {
-                int32_t slot = page * kStashPageSize + k;
-                if (slot >= g_orgSlots || !g_orgUnlocked[slot]) continue;
-                g_orgTarget[slot] = it.uid;
-                placed = true;
-            }
-        }
-        if (!placed) leftovers[nLeft++] = it.uid;
-    }
-    // leftovers: pages 8+ first, then any free unlocked slot from the last page backwards
-    int32_t li = 0;
-    for (int32_t slot = kOrganizePages * kStashPageSize; slot < g_orgSlots && li < nLeft; ++slot)
-        if (g_orgUnlocked[slot] && !g_orgTarget[slot]) g_orgTarget[slot] = leftovers[li++];
-    for (int32_t slot = g_orgSlots - 1; slot >= 0 && li < nLeft; --slot)
-        if (g_orgUnlocked[slot] && !g_orgTarget[slot]) g_orgTarget[slot] = leftovers[li++];
-    // stuck items stay where they are
-    g_orgTargetBuilt = true;
-}
-
-static int32_t OrgFreeSlotFor(const uint64_t* uids, int32_t category)
-{
-    if (category >= 0 && category < kOrganizePages)
-        for (int32_t k = 0; k < kStashPageSize; ++k)
-        {
-            int32_t slot = category * kStashPageSize + k;
-            if (slot < g_orgSlots && g_orgUnlocked[slot] && !uids[slot]) return slot;
-        }
-    for (int32_t slot = g_orgSlots - 1; slot >= 0; --slot)
-        if (g_orgUnlocked[slot] && !uids[slot]) return slot;
-    return -1;
-}
-
-// One step; returns false when finished.
-static bool OrganizeStep()
-{
-    void* rz = nullptr;
-    void* uidMethod = nullptr;
-    if (!ResolveSlotApi(&rz, &uidMethod) || !ResolveMoveApi())
-    {
-        strcpy_s(g_orgError, "slot move API not resolved on this build");
-        return false;
-    }
-    if (++g_orgSteps > 4 * kOrgMaxSlots)
-    {
-        strcpy_s(g_orgError, "step limit reached");
-        return false;
-    }
-    static uint64_t uids[kOrgMaxSlots];
-    static SlotItemInfo infos[kOrgMaxSlots];
-    int32_t n = 0;
-
-    if (g_orgPhase == 0)   // import from the bag
-    {
-        if (!OrgSnapshot(rz, uidMethod, uids, nullptr, nullptr)) { strcpy_s(g_orgError, "stash read failed"); return false; }
-        for (int32_t i = 0; i < kMaxInventorySlots; ++i)
-        {
-            bool failed = false;
-            uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, i, &failed);
-            if (failed) break;
-            if (!uid) continue;
-            SlotItemInfo it;
-            if (!ReadSlotItem(uid, &it)) continue;
-            bool want = (it.itemType == 2 && it.level >= 90 && it.category >= 0) ||
-                        (it.itemType == 1 && it.category >= 0 && it.category <= 3);
-            if (!want || OrgIsStuck(uid)) continue;
-            int32_t dst = OrgFreeSlotFor(uids, it.category);
-            if (dst < 0) { g_orgPhase = 1; return true; }   // stash full
-            if (MoveSlot(kSlotInventory, i, kSlotStash, dst, 0)) ++g_orgImported;
-            bool f2 = false;
-            if (SlotUid(rz, uidMethod, kSlotInventory, i, &f2) == uid)
-            {
-                ++g_orgFails;
-                if (g_orgStuckCount < 64) g_orgStuck[g_orgStuckCount++] = uid;
-            }
-            return true;
-        }
-        g_orgPhase = 1;
-        return true;
-    }
-
-    if (g_orgPhase == 1)   // merge same-key material stacks
-    {
-        if (!OrgSnapshot(rz, uidMethod, uids, nullptr, nullptr)) { strcpy_s(g_orgError, "stash read failed"); return false; }
-        static int32_t stackKey[kOrgMaxSlots];   // material key per slot if stackable, else 0
-        for (int32_t i = 0; i < g_orgSlots; ++i)
-        {
-            stackKey[i] = 0;
-            SlotItemInfo it;
-            if (uids[i] && ReadSlotItem(uids[i], &it) && it.itemType == 1 && it.maxStack > 1) stackKey[i] = it.key;
-        }
-        for (int32_t a = 0; a < g_orgSlots; ++a)
-        {
-            if (!stackKey[a]) continue;
-            for (int32_t b = a + 1; b < g_orgSlots; ++b)
-            {
-                if (stackKey[b] != stackKey[a]) continue;
-                bool tried = false;
-                for (int32_t t = 0; t < g_orgMergeTriedCount; ++t)
-                    if (g_orgMergeTried[t] == (uids[a] ^ (uids[b] << 1))) tried = true;
-                if (tried) continue;
-                if (g_orgMergeTriedCount < 256) g_orgMergeTried[g_orgMergeTriedCount++] = uids[a] ^ (uids[b] << 1);
-                uint64_t before = uids[b];
-                MoveSlot(kSlotStash, b, kSlotStash, a, 0);
-                bool f = false;
-                if (SlotUid(rz, uidMethod, kSlotStash, b, &f) != before &&
-                    SlotUid(rz, uidMethod, kSlotStash, a, &f) != before) ++g_orgMerged;   // not a swap
-                ++g_orgMoves;
-                return true;
-            }
-        }
-        g_orgPhase = 2;
-        g_orgTargetBuilt = false;
-        return true;
-    }
-
-    if (g_orgPhase == 2)   // layout
-    {
-        if (!OrgSnapshot(rz, uidMethod, uids, infos, &n)) { strcpy_s(g_orgError, "stash read failed"); return false; }
-        if (!g_orgTargetBuilt) OrgBuildTargets(infos, n);
-        for (int32_t t = 0; t < g_orgSlots; ++t)
-        {
-            uint64_t want = g_orgTarget[t];
-            if (!want || uids[t] == want) continue;
-            int32_t src = -1;
-            for (int32_t k = 0; k < g_orgSlots; ++k) if (uids[k] == want) { src = k; break; }
-            if (src < 0) { g_orgTargetBuilt = false; return true; }   // item vanished/merged: rebuild
-            MoveSlot(kSlotStash, src, kSlotStash, t, 0);
-            ++g_orgMoves;
-            bool f = false;
-            if (SlotUid(rz, uidMethod, kSlotStash, t, &f) != want)
-            {
-                ++g_orgFails;
-                if (g_orgStuckCount < 64) g_orgStuck[g_orgStuckCount++] = want;
-                g_orgTargetBuilt = false;
-            }
-            return true;
-        }
-        g_orgPhase = 3;
-    }
-    return false;
-}
-
-// Prepares the job (reads unlock state); main thread or worker.
-static bool OrganizeBegin()
-{
-    int32_t used = 0, unlocked = 0, total = 0;
-    for (int32_t i = 0; i < kOrgMaxSlots; ++i) g_orgUnlocked[i] = false;
-    if (!StashSlotStats(&used, &unlocked, &total, g_orgUnlocked))
-    {
-        strcpy_s(g_orgError, "stash unlock state unavailable");
-        return false;
-    }
-    g_orgSlots = total < kOrgMaxSlots ? total : kOrgMaxSlots;
-    g_orgPhase = 0;
-    g_orgFrame = 0;
-    g_orgMoves = g_orgFails = g_orgImported = g_orgMerged = g_orgSteps = 0;
-    g_orgStuckCount = 0;
-    g_orgMergeTriedCount = 0;
-    g_orgTargetBuilt = false;
-    g_orgError[0] = '\0';
-    InterlockedExchange(&g_orgActive, 1);
-    return true;
-}
-
-// Auto organize after boxes: BoxJobTick schedules, the frame hook starts it once boxes are done.
-
-// One-shot main-thread call queued by the worker (probe / organizer helpers).
-static void (*volatile g_mainCall)() = nullptr;
-
-static bool RunOnMainThread(void (*fn)(), int timeoutMs)
-{
-    if (!InstallSimUpdateHook()) return false;
-    g_mainCall = fn;
-    MemoryBarrier();
-    for (int waited = 0; g_mainCall && waited < timeoutMs; waited += 10)
-        Sleep(10);
-    if (g_mainCall) { g_mainCall = nullptr; return false; }
-    return true;
-}
-
-// Probe (command 18): one DRAG move, parameters packed by the trainer / test harness.
-static int32_t g_probeSrcType, g_probeSrcIdx, g_probeDstType, g_probeDstIdx, g_probeQty;
-static bool    g_probeOk;
-static void ProbeMoveMain()
-{
-    g_probeOk = MoveSlot(g_probeSrcType, g_probeSrcIdx, g_probeDstType, g_probeDstIdx, g_probeQty);
-}
 
 static void HookedSimUpdate(void* self, const void* method)
 {
     bool paused = g_shared && g_shared->trainerPaused;
-    if (g_mainCall && !g_shuttingDown && !paused)
-    {
-        void (*fn)() = g_mainCall;
-        fn();
-        g_mainCall = nullptr;
-    }
-    if (g_autoOpenBoxes && !g_shuttingDown && !paused && !g_orgActive) BoxJobTick();
-    if (g_orgActive && !g_shuttingDown && !paused)
-    {
-        if ((++g_orgFrame % 3) == 0 && !OrganizeStep())
-            InterlockedExchange(&g_orgActive, 0);
-    }
-    else if (g_orgRequest && !g_shuttingDown && !paused)
-    {
-        g_orgDueAt = 0;
-        InterlockedExchange(&g_orgBeginFailed, OrganizeBegin() ? 0 : 1);
-        InterlockedExchange(&g_orgRequest, 0);
-    }
-    else if (g_autoOrganize && g_orgDueAt && GetTickCount64() >= g_orgDueAt && !g_shuttingDown && !paused)
-    {
-        g_orgDueAt = 0;
-        if (OrganizeBegin()) InterlockedIncrement(&g_orgAutoRuns);
-    }
-    if (g_uiClickPending && !g_shuttingDown && !paused)
-    {
-        UiClickStep();
-        InterlockedExchange(&g_uiClickPending, 0);
-    }
-    if (g_stashJobActive && g_stashJobSim && !g_shuttingDown && !paused)
-    {
-        // ~6 frames between moves so the game's move animation / save can finish.
-        if ((++g_stashJobFrame % 6) == 0 && !StashJobStep(g_stashJobSim))
-            InterlockedExchange(&g_stashJobActive, 0);
-    }
+    if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
     g_origSimUpdate(self, method);
 }
 
@@ -3382,184 +2761,12 @@ static void InstallShutdownWatch()
     SetWindowsHookExW(WH_GETMESSAGE, ShutdownGetMsgHook, nullptr, mainThread);
 }
 
-// The worker blocks while a main-thread job runs (auto stash up to 30s, UI click up to 5s);
-// keep god mode / hero locks going meanwhile so heroes can't die during the wait.
-static void KeepHeroesAlive()
-{
-    if (g_shuttingDown || (g_shared && g_shared->trainerPaused)) return;
-    if (g_godMode) ApplyGodModeAllHeroes();
-    for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex)
-        ApplyHeroLocks(heroIndex);
-}
-
-// Command 15: move every inventory item with level >= value into the stash (main thread).
-static void RunAutoStash()
-{
-    char* text = g_heroScan->text;
-    const size_t cap = sizeof(g_heroScan->text);
-    if (!InstallSimUpdateHook())
-    {
-        size_t n = ScanAppend(text, cap, 0, "ERROR: could not install the per-frame hook on this build.\r\n");
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = -1;
-        return;
-    }
-    static void* s_simClass = nullptr;
-    if (!s_simClass) s_simClass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
-    g_stashJobSim = FindSingletonInstance(s_simClass);
-    if (!g_stashJobSim)
-    {
-        size_t n = ScanAppend(text, cap, 0, "ERROR: SlotInteractionManager not found - open the HERO bag and STASH first.\r\n");
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = -1;
-        return;
-    }
-
-    g_stashJobMinLevel = g_heroScan->value > 0 ? static_cast<int32_t>(g_heroScan->value) : 90;
-    g_stashJobIndex = 0;
-    g_stashJobMoved = 0;
-    g_stashJobFailed = 0;
-    g_stashJobFrame = 0;
-    g_stashJobError[0] = '\0';
-    InterlockedExchange(&g_stashJobActive, 1);
-
-    for (int waited = 0; g_stashJobActive && waited < 30000; waited += 50)
-    {
-        Sleep(50);
-        if ((waited % 100) == 0) KeepHeroesAlive();
-    }
-    bool timedOut = g_stashJobActive != 0;
-    InterlockedExchange(&g_stashJobActive, 0);
-
-    size_t n = ScanAppend(text, cap, 0, "%s Auto stash (Lv%d+): moved %d, failed %d%s%s%s\r\n",
-        g_stashJobFailed == 0 && !timedOut ? "OK:" : "WARN:", g_stashJobMinLevel, g_stashJobMoved, g_stashJobFailed,
-        timedOut ? " (timed out - is the game window running?)" : "",
-        g_stashJobError[0] ? " - last error: " : "", g_stashJobError);
-    g_heroScan->length = static_cast<int32_t>(n);
-    g_heroScan->done = g_stashJobFailed == 0 && !timedOut ? 1 : -1;
-}
-
 static void RunHeroCommand()
 {
     if (!g_heroScan) return;
     g_heroScan->done = 0;
     g_heroScan->length = 0;
     memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
-
-    if (g_heroScan->command == 21)
-    {
-        g_autoOrganize = g_heroScan->value != 0.0f;
-        if (g_autoOrganize) InstallSimUpdateHook();
-        size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-            "OK: Organize stash after opening boxes %s (auto runs so far: %ld, boxes opened: %ld)\r\n",
-            g_autoOrganize ? "ON" : "OFF", g_orgAutoRuns, g_boxOpened);
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = 1;
-        return;
-    }
-
-    if (g_heroScan->command == 20)
-    {
-        size_t n = 0;
-        bool ok = false;
-        if (!InstallSimUpdateHook())
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Organize - could not install the per-frame hook.\r\n");
-        else
-        {
-            // The main thread starts the run (so it can't race an automatic one).
-            if (!g_orgActive)
-            {
-                InterlockedExchange(&g_orgBeginFailed, 0);
-                InterlockedExchange(&g_orgRequest, 1);
-                for (int w = 0; g_orgRequest && w < 5000; w += 20) Sleep(20);
-            }
-            int waited = 0;
-            for (; g_orgActive && waited < 180000; waited += 50)
-            {
-                Sleep(50);
-                if ((waited % 100) == 0) KeepHeroesAlive();
-            }
-            bool timedOut = g_orgActive != 0 || g_orgRequest != 0;
-            if (g_orgRequest) { InterlockedExchange(&g_orgRequest, 0); strcpy_s(g_orgError, "game is not running frames"); }
-            ok = !timedOut && !g_orgBeginFailed && g_orgError[0] == '\0';
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-                "%s Organize stash: imported %d from bag, merged %d, moves %d, failed %d%s%s%s\r\n",
-                ok ? "OK:" : "WARN:", g_orgImported, g_orgMerged, g_orgMoves, g_orgFails,
-                timedOut ? " (still running)" : "", g_orgError[0] ? " - " : "", g_orgError);
-        }
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = ok ? 1 : -1;
-        return;
-    }
-
-    if (g_heroScan->command == 18)
-    {
-        // Move probe: heroIndex = srcType*10000 + srcIndex, value = dstType*10000 + dstIndex,
-        // quantity = 0 (drag the whole slot).
-        int32_t src = g_heroScan->heroIndex;
-        int32_t dst = static_cast<int32_t>(g_heroScan->value);
-        g_probeSrcType = src / 10000; g_probeSrcIdx = src % 10000;
-        g_probeDstType = dst / 10000; g_probeDstIdx = dst % 10000;
-        g_probeQty = 0;
-        void* rz = nullptr;
-        void* uidMethod = nullptr;
-        size_t n = 0;
-        if (!ResolveSlotApi(&rz, &uidMethod))
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: slot API not resolved.\r\n");
-        else
-        {
-            bool f = false;
-            uint64_t a0 = SlotUid(rz, uidMethod, g_probeSrcType, g_probeSrcIdx, &f);
-            uint64_t b0 = SlotUid(rz, uidMethod, g_probeDstType, g_probeDstIdx, &f);
-            bool ran = RunOnMainThread(ProbeMoveMain, 3000);
-            Sleep(600);
-            uint64_t a1 = SlotUid(rz, uidMethod, g_probeSrcType, g_probeSrcIdx, &f);
-            uint64_t b1 = SlotUid(rz, uidMethod, g_probeDstType, g_probeDstIdx, &f);
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-                "%s move %d:%d -> %d:%d  ran=%d ok=%d  before src=%llX dst=%llX  after src=%llX dst=%llX\r\n",
-                ran && g_probeOk ? "OK:" : "ERROR:", g_probeSrcType, g_probeSrcIdx, g_probeDstType, g_probeDstIdx,
-                ran ? 1 : 0, g_probeOk ? 1 : 0,
-                (unsigned long long)a0, (unsigned long long)b0, (unsigned long long)a1, (unsigned long long)b1);
-        }
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = 1;
-        return;
-    }
-
-    if (g_heroScan->command == 17)
-    {
-        // Press a game UI button on the main thread. value 1 = stash Sort.
-        size_t n = 0;
-        if (!InstallSimUpdateHook())
-            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-                "ERROR: Stash sort - could not install the per-frame hook on this build.\r\n");
-        else
-        {
-            g_uiClickClass = "UI_Stash";
-            g_uiClickField = "SortingButton";
-            g_uiClickError[0] = '\0';
-            g_uiClickResult = 0;   // a timeout must not report the previous click's result
-            InterlockedExchange(&g_uiClickPending, 1);
-            for (int waited = 0; g_uiClickPending && waited < 5000; waited += 20)
-            {
-                Sleep(20);
-                if ((waited % 100) == 0) KeepHeroesAlive();
-            }
-            if (g_uiClickPending)
-            {
-                InterlockedExchange(&g_uiClickPending, 0);
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort timed out (game not running frames?).\r\n");
-            }
-            else if (g_uiClickResult == 1)
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, g_uiClickSortedDirect
-                    ? "OK: Stash sorted (all pages).\r\n" : "OK: Stash Sort button pressed.\r\n");
-            else
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "ERROR: Stash sort - %s.\r\n", g_uiClickError);
-        }
-        g_heroScan->length = static_cast<int32_t>(n);
-        g_heroScan->done = g_uiClickResult == 1 ? 1 : -1;
-        return;
-    }
 
     if (g_heroScan->command == 16)
     {
@@ -4200,7 +3407,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
 
     bool wasEnabled = false;
     InstallShutdownWatch();
-    InstallSimUpdateHook();   // main-thread jobs (auto stash, boxes, UI clicks)
+    InstallSimUpdateHook();   // per-frame main-thread hook (auto open boxes)
 
     for (;;)
     {
@@ -4332,13 +3539,6 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 RunHeroScan();
             else if (g_heroScan->command == 7)
                 RunHeroLayoutDump();
-            else if (g_heroScan->command == 15)
-            {
-                g_heroScan->done = 0;
-                g_heroScan->length = 0;
-                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
-                RunAutoStash();
-            }
             else if (g_heroScan->command == 19)
             {
                 g_heroScan->done = 0;
