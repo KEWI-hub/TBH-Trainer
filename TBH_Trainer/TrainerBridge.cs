@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal sealed class TrainerBridge : IDisposable
 {
     private const string MapName = "TBHTrainerShared";
-    private const int    MapSize = 100;
+    private const int    MapSize = 104;
     private const int    Magic   = 0x31484254; // "TBH1"
 
     private const long OffMagic        = 0x00;
@@ -37,6 +37,7 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffRvaStashCache = 0x58;
     private const long OffRvaBoxCount = 0x5C;
     private const long OffTrainerPaused = 0x60;
+    private const long OffRvaSlotMove   = 0x64;
 
     private MemoryMappedFile?         _mmf;
     private MemoryMappedViewAccessor? _view;
@@ -82,6 +83,7 @@ internal sealed class TrainerBridge : IDisposable
         _view.Write(OffRvaSlotUid,   api ? profile.SlotUidRva : 0);
         _view.Write(OffRvaStashCache, api ? profile.StashCacheRva : 0);
         _view.Write(OffRvaBoxCount, api ? profile.BoxCountRva : 0);
+        _view.Write(OffRvaSlotMove, api ? profile.SlotMoveRva : 0);
         _view.Write(OffTrainerPaused, 0);   // (re)connected: resume
     }
 

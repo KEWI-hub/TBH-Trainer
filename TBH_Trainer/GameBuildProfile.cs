@@ -57,6 +57,9 @@ internal sealed class GameBuildProfile
     /// <summary>static int wh.uy.jif(EBoxType, EContentType) -> unopened stage boxes (auto open boxes).</summary>
     public int BoxCountRva { get; init; }
 
+    /// <summary>rz.ije(MoveRequest, Action&lt;MoveResult&gt;): drag &amp; drop between slots (bag -> stash). 0 = n/a.</summary>
+    public int SlotMoveRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -269,6 +272,7 @@ internal sealed class GameBuildProfile
         SlotUidRva = 0x8F4000,      // rz.ikg
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
         BoxCountRva   = 0x96D650,   // wh.uy.jig(EBoxType, EContentType) -> box count
+        SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,

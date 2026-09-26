@@ -38,6 +38,8 @@ internal sealed class MainForm : Form
     private CheckBox _chkOneHitKill = null!;
     private CheckBox _chkGodMode = null!;
     private CheckBox _chkAutoOpenBoxes = null!;
+    private CheckBox _chkBagToStash = null!;
+    private Button _btnBagToStashNow = null!;
 
     private TextBox _txtItemKey = null!;
     private ComboBox _cmbGrade = null!;
@@ -332,7 +334,7 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Stash Item Spawn (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 226);
+        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 210);
         grp6.Controls.Add(new Label
         {
             Text = "Each ItemKey has a fixed rarity in the catalog. Grade picks another row (e.g. 304061 Immortal → Cosmic uses 309161). Export catalog to browse IDs.",
@@ -385,7 +387,20 @@ internal sealed class MainForm : Form
         };
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
 
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _lblSpawnStatus });
+        // Empties the bag into the stash once it fills up, so boxes keep opening.
+        // Stash page 1 is kept for soul stones only; nothing else is sorted.
+        _chkBagToStash = new CheckBox
+        {
+            Text = "Bag → stash when full (page 1 = soul stones)", Location = new Point(230, 136), AutoSize = true,
+            ForeColor = TextMain, Checked = true
+        };
+        _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
+
+        _btnBagToStashNow = MakeBtn("Empty bag now", 15, 166, 150);
+        _btnBagToStashNow.Enabled = false;
+        _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
+
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -857,6 +872,7 @@ internal sealed class MainForm : Form
         _txtSpawnCount.Enabled = enabled;
         _btnSpawnItem.Enabled = enabled;
         _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
+        _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
         _btnExportCatalog.Enabled = enabled;
     }
 
@@ -981,6 +997,7 @@ internal sealed class MainForm : Form
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
         if (_chkGodMode.Checked) ApplyCombatToggle(13, true);
         if (_chkAutoOpenBoxes.Checked && _buildProfile.BoxCountRva > 0) ApplyCombatToggle(16, true);
+        if (_chkBagToStash.Checked && _buildProfile.SlotMoveRva > 0) ApplyCombatToggle(33, true);
     }
 
     /// <summary>
@@ -1012,6 +1029,34 @@ internal sealed class MainForm : Form
     /// Command 31: one page answering "is everything actually working?" — hook alive, game
     /// running frames, which game APIs resolved, heroes and locks, boxes, stash.
     /// </summary>
+    /// <summary>
+    /// Command 33 with value 2: moves everything out of the bag right now. Soul stones go to
+    /// stash page 1, everything else to page 2 and later; the toggle keeps its own state.
+    /// </summary>
+    private void OnBagToStashNow()
+    {
+        if (!EnsureGameApiAllowed("Bag to stash")) return;
+        if (!EnsureSpeedReady()) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        _btnBagToStashNow.Enabled = false;
+        try
+        {
+            Log("--- Emptying the bag into the stash (page 1 = soul stones) ---");
+            string? result = _heroScanBridge.WriteValue(33, 0, 2f, timeoutMs: 70000);
+            Log(result?.Trim() ?? "ERROR: bag to stash timed out.");
+            RunInventoryScan();
+        }
+        finally
+        {
+            _btnBagToStashNow.Enabled = true;
+        }
+    }
+
     private void OnSelfCheck()
     {
         Log("--- Self-check ---");

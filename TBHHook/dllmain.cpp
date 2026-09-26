@@ -45,14 +45,15 @@ struct SharedState
     int32_t rvaStashCache; // 0x58  static Stash.kcc(int index) -> StashCache (unlock state per slot)
     int32_t rvaBoxCount;   // 0x5C  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
     int32_t trainerPaused; // 0x60  1 = trainer disconnected: stop every call into the game
+    int32_t rvaSlotMove;   // 0x64  rz.ije(MoveRequest, Action<MoveResult>) -> player drag & drop
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 100, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 104, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 100;
+static const int      kMapSize = 104;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -79,8 +80,8 @@ struct HeroScanState
                        // 6=clear locks, 7=layout dump, 8=crit chance, 9=crit damage, 10=cooldown reduction,
                        // 11=armor, 12=one-hit kill toggle, 13=god mode toggle,
                        // 22=move speed, 23=cast speed, 24=max stats (all heroes),
-                       // 25-30=area of effect / increase exp / additional exp / skill range /
-                       //       projectile count / multistrike, 31=self-check
+                       // 25-28=area of effect / skill range / projectile count / multistrike,
+                       // 31=self-check, 33=bag to stash when the bag is full
     int32_t heroIndex;
     float   value;
     int32_t reserved;
@@ -2636,6 +2637,7 @@ static void*     g_boxLastTarget = nullptr;
 static int32_t   g_boxLastCount  = 0;
 static int32_t   g_boxNoProgress = 0;
 static volatile LONG g_boxOpened = 0;
+static volatile bool g_bagBoxStuck = false;   // boxes stopped opening: the bag is probably full
 
 static void BoxJobTick()
 {
@@ -2671,6 +2673,10 @@ static void BoxJobTick()
     // Count not going down (inventory full, popup open...): back off instead of spamming.
     if (target == g_boxLastTarget && count >= g_boxLastCount)
     {
+        // Two clicks with nothing opened is what a full bag looks like from here, and the
+        // slot API reports the table's 260 rows rather than the player's real capacity,
+        // so this - not a free-slot count - is what starts the bag move.
+        if (g_boxNoProgress >= 2) g_bagBoxStuck = true;
         if (++g_boxNoProgress >= 5)
         {
             g_boxNoProgress = 0;
@@ -2697,6 +2703,237 @@ static void BoxJobTick()
 
 static bool InstallSimUpdateHook();
 
+// ---------------------------------------------------------------------------------
+// Slot moves: rz.ije(MoveRequest, Action<MoveResult>) is what SlotInteractionManager calls
+// when the player drags a slot onto another (DRAG = swap, or stack onto a matching target).
+// ---------------------------------------------------------------------------------
+struct MoveRequestNative   // TaskbarHero.MoveRequest
+{
+    int32_t sourceType;
+    int32_t sourceIndex;
+    int32_t targetType;
+    int32_t targetIndex;
+    int32_t moveType;      // EMoveType.DRAG = 0
+    int32_t quantity;
+};
+
+static void* g_moveMethod = nullptr;
+static void* g_moveCbClass = nullptr;
+static void* g_moveCbMethod = nullptr;
+static void* g_moveCbTarget = nullptr;
+
+// Resolves rz.ije and a callback: SlotInteractionManager's own MoveResult handler (shows the
+// game's toast when a move is refused), the same kind of callback the drag & drop UI passes.
+static bool ResolveMoveApi()
+{
+    if (!g_moveMethod && g_shared && g_shared->rvaSlotMove > 0)
+        g_moveMethod = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaSlotMove), 2, nullptr);
+    if (!g_moveMethod || !il2cpp_method_get_param) return false;
+    if (!g_moveCbClass) g_moveCbClass = il2cpp_class_from_type(il2cpp_method_get_param(g_moveMethod, 1));
+    void* simClass = FindClass(g_domain, "TaskbarHero", "SlotInteractionManager");
+    if (!simClass || !g_moveCbClass) return false;
+    g_moveCbTarget = FindSingletonInstance(simClass);   // refreshed: the scene can be reloaded
+    if (!g_moveCbMethod)
+    {
+        void* iter = nullptr;
+        void* m = nullptr;
+        void* candidates[8] = {};
+        int n = 0;
+        while ((m = il2cpp_class_get_methods(simClass, &iter)) != nullptr && n < 8)
+        {
+            if (il2cpp_method_get_param_count(m) != 1) continue;
+            char* tn = il2cpp_type_get_name(il2cpp_method_get_param(m, 0));
+            bool match = tn && StrContains(tn, "MoveResult");
+            if (tn && il2cpp_free) il2cpp_free(tn);
+            if (match) candidates[n++] = m;
+        }
+        // Two obfuscated names share the real handler, so a duplicate method pointer picks it.
+        for (int i = 0; i < n && !g_moveCbMethod; ++i)
+            for (int j = i + 1; j < n; ++j)
+                if (MethodPointer(candidates[i]) == MethodPointer(candidates[j])) { g_moveCbMethod = candidates[i]; break; }
+        if (!g_moveCbMethod && n > 0) g_moveCbMethod = candidates[0];
+    }
+    return g_moveMethod && g_moveCbMethod && g_moveCbTarget;
+}
+
+// Main thread only. Returns false if the call could not be made or threw.
+static bool MoveSlot(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t dstIndex, int32_t quantity)
+{
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod) || !ResolveMoveApi()) return false;
+
+    void* cb = il2cpp_object_new(g_moveCbClass);
+    void* ctor = cb ? il2cpp_class_get_method_from_name(g_moveCbClass, ".ctor", 2) : nullptr;
+    if (!ctor) return false;
+    void* methodInfo = g_moveCbMethod;
+    void* ctorArgs[2] = { g_moveCbTarget, &methodInfo };
+    void* exc = nullptr;
+    il2cpp_runtime_invoke(ctor, cb, ctorArgs, &exc);
+    if (exc) return false;
+
+    MoveRequestNative req = { srcType, srcIndex, dstType, dstIndex, 0, quantity };
+    void* args[2] = { &req, cb };
+    exc = nullptr;
+    il2cpp_runtime_invoke(g_moveMethod, rz, args, &exc);
+    return exc == nullptr;
+}
+
+// ---------------------------------------------------------------------------------
+// Bag -> stash (main thread, one drag per step). Runs when the bag fills up, so opening
+// boxes never stops for lack of room. Nothing is sorted; the only rule is that stash
+// page 1 holds soul stones and nothing else:
+//   - a soul stone goes to page 1 (onto a matching stack first, so five fit in one slot)
+//   - anything else goes to page 2 or later
+//   - anything that is not a soul stone but sits in page 1 is moved out
+// ---------------------------------------------------------------------------------
+static volatile bool g_autoBagMove = false;
+static volatile LONG g_bagMoved = 0;
+static char      g_bagError[128] = {};
+static int32_t   g_bagFrame = 0;
+static ULONGLONG g_bagNextCheck = 0;
+static volatile LONG g_bagRunning = 0;    // 1 while it is emptying the bag
+static const int32_t kSoulStoneCategory = 0;   // ReadSlotItem category for soul stones
+
+// One drag. Returns true when something was moved.
+static bool BagMoveStep()
+{
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod)) { strcpy_s(g_bagError, "slot API not resolved"); return false; }
+    if (!ResolveMoveApi()) { strcpy_s(g_bagError, "move API not resolved on this build"); return false; }
+
+    int32_t stashTotal = 0, stashUsed = 0, stashUnlocked = 0;
+    static bool unlocked[kMaxStashSlots];
+    if (!StashSlotStats(&stashUsed, &stashUnlocked, &stashTotal, unlocked))
+    {
+        strcpy_s(g_bagError, "stash slot state not readable yet");
+        return false;
+    }
+    if (stashTotal > kMaxStashSlots) stashTotal = kMaxStashSlots;
+
+    static uint64_t stash[kMaxStashSlots];
+    for (int32_t i = 0; i < stashTotal; ++i)
+    {
+        bool failed = false;
+        stash[i] = unlocked[i] ? SlotUid(rz, uidMethod, kSlotStash, i, &failed) : 0;
+        if (failed) stash[i] = 0;
+    }
+
+    // Free stash slots, split by the page-1 rule.
+    int32_t freeInPage1 = -1, freeOutside = -1;
+    for (int32_t i = 0; i < stashTotal; ++i)
+    {
+        if (!unlocked[i] || stash[i]) continue;
+        if (i < kStashPageSize) { if (freeInPage1 < 0) freeInPage1 = i; }
+        else if (freeOutside < 0) freeOutside = i;
+    }
+
+    // Rule enforcement first: nothing but soul stones may sit in page 1.
+    for (int32_t i = 0; i < kStashPageSize && i < stashTotal; ++i)
+    {
+        if (!stash[i]) continue;
+        SlotItemInfo it;
+        if (!ReadSlotItem(stash[i], &it) || it.category == kSoulStoneCategory) continue;
+        if (freeOutside < 0) { strcpy_s(g_bagError, "stash is full outside page 1"); return false; }
+        if (MoveSlot(kSlotStash, i, kSlotStash, freeOutside, 0)) { InterlockedIncrement(&g_bagMoved); return true; }
+        strcpy_s(g_bagError, "could not move a non-soul-stone out of page 1");
+        return false;
+    }
+
+    // Then the bag: oldest slot first.
+    for (int32_t i = 0; i < kMaxInventorySlots; ++i)
+    {
+        bool failed = false;
+        uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, i, &failed);
+        if (failed) break;               // past the end of the bag
+        if (!uid) continue;
+
+        SlotItemInfo it;
+        if (!ReadSlotItem(uid, &it)) continue;
+        bool soulStone = it.category == kSoulStoneCategory;
+
+        // Stack onto a matching pile first: five soul stones fit where one would.
+        if (it.itemType == 1 && it.maxStack > 1)
+        {
+            for (int32_t d = 0; d < stashTotal; ++d)
+            {
+                if (!stash[d] || !unlocked[d]) continue;
+                if ((d < kStashPageSize) != soulStone) continue;   // keep the page-1 rule
+                SlotItemInfo dst;
+                if (!ReadSlotItem(stash[d], &dst) || dst.key != it.key) continue;
+                MoveSlot(kSlotInventory, i, kSlotStash, d, 0);
+                bool f = false;
+                if (SlotUid(rz, uidMethod, kSlotInventory, i, &f) != uid)   // the pile took it
+                {
+                    InterlockedIncrement(&g_bagMoved);
+                    return true;
+                }
+                break;   // that pile was full: fall through to a free slot
+            }
+        }
+
+        int32_t target = soulStone ? (freeInPage1 >= 0 ? freeInPage1 : freeOutside) : freeOutside;
+        if (target < 0)
+        {
+            strcpy_s(g_bagError, soulStone ? "stash is full" : "stash is full outside page 1");
+            return false;
+        }
+        if (MoveSlot(kSlotInventory, i, kSlotStash, target, 0))
+        {
+            InterlockedIncrement(&g_bagMoved);
+            return true;
+        }
+        strcpy_s(g_bagError, "the game refused the move");
+        return false;
+    }
+
+    strcpy_s(g_bagError, "bag is empty");
+    return false;
+}
+
+// Counts the bag's free slots; capacity is where the slot API stops answering.
+static int32_t BagFreeSlots()
+{
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod)) return -1;
+    int32_t free = 0;
+    for (int32_t i = 0; i < kMaxInventorySlots; ++i)
+    {
+        bool failed = false;
+        uint64_t uid = SlotUid(rz, uidMethod, kSlotInventory, i, &failed);
+        if (failed) break;
+        if (!uid) ++free;
+    }
+    return free;
+}
+
+static void BagMoveTick()
+{
+    ULONGLONG now = GetTickCount64();
+    if (now < g_bagNextCheck) return;
+
+    // One move every 6 frames while working, otherwise look again in a second.
+    if (g_bagRunning)
+    {
+        if ((++g_bagFrame % 6) != 0) return;         // one drag every 6 frames
+        if (BagMoveStep()) return;
+        InterlockedExchange(&g_bagRunning, 0);
+        g_bagNextCheck = now + 30000;    // bag empty / stash full: stop trying for a while
+        return;
+    }
+
+    g_bagNextCheck = now + 1000;
+    if (g_bagBoxStuck || BagFreeSlots() == 0)
+    {
+        g_bagBoxStuck = false;
+        g_bagError[0] = '\0';
+        InterlockedExchange(&g_bagRunning, 1);   // bag is full: empty it
+        g_bagFrame = 0;
+    }
+}
+
 static volatile LONG g_frameCount = 0;
 
 static void HookedSimUpdate(void* self, const void* method)
@@ -2704,6 +2941,7 @@ static void HookedSimUpdate(void* self, const void* method)
     InterlockedIncrement(&g_frameCount);
     bool paused = g_shared && g_shared->trainerPaused;
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
+    if (g_autoBagMove && !g_shuttingDown && !paused) BagMoveTick();
     g_origSimUpdate(self, method);
 }
 
@@ -2899,6 +3137,10 @@ static void RunSelfCheck()
         g_autoOpenBoxes ? "ON" : "off", boxApi ? "ok" : "NOT resolved",
         boxApi ? "" : " - ", boxApi ? "" : g_boxError, g_boxOpened);
 
+    pos = ScanAppend(text, cap, pos, "bag to stash: %s | bag free slots: %d | moved so far: %ld%s%s\r\n",
+        g_autoBagMove ? "ON" : "off", BagFreeSlots(), g_bagMoved,
+        g_bagError[0] ? " | last note: " : "", g_bagError);
+
     int32_t used = 0, unlocked = 0, total = 0;
     if (StashSlotStats(&used, &unlocked, &total))
         pos = ScanAppend(text, cap, pos, "stash: %d used of %d unlocked (%d slots exist)\r\n", used, unlocked, total);
@@ -2916,6 +3158,52 @@ static void RunHeroCommand()
     g_heroScan->done = 0;
     g_heroScan->length = 0;
     memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+
+    if (g_heroScan->command == 33)
+    {
+        // value 2 = empty the bag now, whether or not it is full.
+        bool runNow = g_heroScan->value == 2.0f;
+        bool on = g_heroScan->value != 0.0f;
+        size_t n = 0;
+        if (on && !InstallSimUpdateHook())
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "ERROR: Bag to stash - could not install the per-frame hook on this build.\r\n");
+        else if (on && (!g_shared || g_shared->rvaSlotMove <= 0))
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "ERROR: Bag to stash - this game build has no move API mapped yet.\r\n");
+        else if (runNow)
+        {
+            LONG before = g_bagMoved;
+            g_bagError[0] = '\0';
+            g_bagFrame = 0;
+            g_bagNextCheck = 0;
+            bool wasOn = g_autoBagMove;
+            InterlockedExchange(&g_bagRunning, 1);
+            g_autoBagMove = true;                     // the frame hook does the moving
+            for (int waited = 0; g_bagRunning && waited < 60000; waited += 50) Sleep(50);
+            InterlockedExchange(&g_bagRunning, 0);
+            g_autoBagMove = wasOn;                    // a manual run does not turn the toggle on
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "OK: Bag to stash - moved %ld item(s) now (total %ld)%s%s\r\n",
+                g_bagMoved - before, g_bagMoved,
+                g_bagError[0] ? " - stopped because: " : "", g_bagError);
+        }
+        else
+        {
+            g_autoBagMove = on;
+            InterlockedExchange(&g_bagRunning, 0);
+            g_bagNextCheck = 0;
+            if (on) g_bagError[0] = '\0';
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                "OK: Bag to stash %s%s (moved so far: %ld)%s%s\r\n",
+                on ? "ON" : "OFF",
+                on ? " - when the bag fills up; stash page 1 stays soul stones only" : "",
+                g_bagMoved, g_bagError[0] ? " last note: " : "", g_bagError);
+        }
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = 1;
+        return;
+    }
 
     if (g_heroScan->command == 16)
     {
