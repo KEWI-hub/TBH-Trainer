@@ -307,10 +307,48 @@ internal sealed class GameBuildProfile
 
             var fromDisk = DetectFromDisk(path);
             if (fromDisk != null) return fromDisk;
+
+            // Unknown build: find the detectors by their layout so a game patch does not
+            // have to wait for a trainer release. Only the ACTk bypass and the speed hack
+            // are enabled — everything that needs verified il2cpp offsets stays off.
+            var scan = ActkScanner.Scan(path);
+            LastScanDetail = scan.Detail;
+            if (scan.Ok) return FromActkScan(scan.Targets!);
         }
 
         return null;
     }
+
+    /// <summary>Why the last ACTk layout scan succeeded or failed (for the trainer log).</summary>
+    public static string? LastScanDetail { get; private set; }
+
+    /// <summary>True for a profile built by scanning instead of one shipped with the trainer.</summary>
+    public bool FromScan { get; init; }
+
+    /// <summary>
+    /// Minimal profile for a build the trainer does not know: the detector RVAs come from
+    /// the scan, and every feature that depends on offsets we could not verify is off.
+    /// </summary>
+    public static GameBuildProfile FromActkScan((string Name, int Rva, int DiskOffset, byte[] Signature)[] targets) => new()
+    {
+        VersionLabel = "unknown build (detectors located by scan)",
+        BuildId = 0,
+        ActkTargets = targets,
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0,
+        StashNamespace = "wh",
+        GameApiVerified = false,
+        ItemScanSupported = false,
+        HeroStatsVerified = false,
+        FromScan = true,
+    };
 
     public static string? ResolveDllPath(GameMemory mem, string? preferredPath)
     {

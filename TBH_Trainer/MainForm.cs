@@ -168,6 +168,18 @@ internal sealed class MainForm : Form
                 "Until then, ACTk bypass and all item / hero features will refuse to run.",
                 "Unsupported game version", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+        else if (build.FromScan)
+        {
+            string gameVersion = ReadGameVersion(dllPath) ?? "unknown";
+            MessageBox.Show(this,
+                $"Taskbar Hero {gameVersion} is newer than this trainer, but the six ACTk detectors " +
+                "were located by scanning the game, so:\n\n" +
+                "  • ACTk bypass and Speedhack work\n" +
+                "  • Hero stats, item spawn and the scans stay off until the offsets for this build " +
+                "are verified\n\n" +
+                "Check for a trainer update to get the rest back:\n" + Updater.ReleasesUrl,
+                "New game version — partial support", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
         else
         {
             MessageBox.Show(this,
@@ -385,9 +397,17 @@ internal sealed class MainForm : Form
             return;
         }
         _startupDiskBuild = GameBuildProfile.DetectFromDisk(_startupDllPath);
-        Log(_startupDiskBuild != null
-            ? $"Installed game build: {_startupDiskBuild.VersionLabel}."
-            : "Installed game build: unknown (not supported by this trainer).");
+        if (_startupDiskBuild != null)
+        {
+            Log($"Installed game build: {_startupDiskBuild.VersionLabel}.");
+            return;
+        }
+        // Newer than this trainer: say up front whether the detector scan will carry it.
+        var scan = ActkScanner.Scan(_startupDllPath);
+        Log(scan.Ok
+            ? $"Installed game build: unknown, but the ACTk detectors were found by scanning ({scan.Detail}) — " +
+              "ACTk bypass and Speedhack will work on Connect."
+            : $"Installed game build: unknown and the detector scan did not find them ({scan.Detail}).");
     }
 
     private void BuildHeroStatsTab(TabPage page)
@@ -622,7 +642,17 @@ internal sealed class MainForm : Form
             if (detected != null)
             {
                 _buildProfile = detected;
-                Log($"Detected game build: {_buildProfile.VersionLabel}.");
+                if (_buildProfile.FromScan)
+                {
+                    Log("Unknown game build — located the ACTk detectors by scanning GameAssembly.dll " +
+                        $"({GameBuildProfile.LastScanDetail}).");
+                    Log("  ACTk bypass and Speedhack work. Hero stats, item spawn and scans stay off " +
+                        "until the offsets for this build are verified.");
+                }
+                else
+                {
+                    Log($"Detected game build: {_buildProfile.VersionLabel}.");
+                }
                 foreach (var feature in DisabledFeatures(_buildProfile))
                     Log($"  Not available on {_buildProfile.VersionLabel}: {feature}.");
             }
@@ -772,7 +802,7 @@ internal sealed class MainForm : Form
             return false;
         }
 
-        _bridge.PublishBuildProfile(_buildProfile, allowGameApi: _buildDetected);
+        _bridge.PublishBuildProfile(_buildProfile, allowGameApi: GameApiAllowed);
 
         Log($"Bridge connected. build={_buildProfile.VersionLabel} il2cpp={_bridge.Il2CppReady}, Time={_bridge.TimeResolved}, Stash={_bridge.StashResolved}.");
         if (!_bridge.TimeResolved)
