@@ -291,8 +291,6 @@ static const ExtraStat kExtraStats[] =
     { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f },       // live heroes reach ~30
     { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f },       // live heroes reach ~2.4
     { 0x1E0, 0,     "Area of Effect",     kStatObscured, 8.0f },        // live heroes reach ~5.8
-    { 0x214, 0,     "Increase EXP",       kStatObscured, 10.0f },       // multiplier: live ~1.1-1.7
-    { 0x228, 0,     "Additional EXP",     kStatObscuredInt, 1000.0f },  // flat EXP per kill
     { 0x274, 0,     "Skill Range",        kStatFloat,    3.0f },
     { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
     { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
@@ -306,7 +304,7 @@ static int ExtraStatIndex(int32_t command)
     if (command >= 8 && command <= 11) return command - 8;
     if (command == 22) return 4;   // Move Speed
     if (command == 23) return 5;   // Cast Speed
-    if (command >= 25 && command <= 30) return command - 25 + 6;
+    if (command >= 25 && command <= 28) return command - 25 + 6;
     return -1;
 }
 
@@ -2208,9 +2206,15 @@ static bool WriteExtraStat(void* hero, const ExtraStat& stat, float value)
             return WriteObscuredFloat(hero, stat.offset, value);
         case kStatObscuredInt:
         {
-            // ObscuredInt: the hidden value at +0x04 is xored with the key at +0x08.
-            int32_t key = *reinterpret_cast<int32_t*>(field + 0x08);
-            *reinterpret_cast<int32_t*>(field + 0x04) = static_cast<int32_t>(value) ^ key;
+            // ObscuredInt (read off the game's own decoder): value = (hidden - key) ^ key,
+            // so hidden = (value ^ key) + key. hash at +0x00 only matters to the detectors,
+            // which are already patched out; fakeValue at +0x0C is kept in sync when it is live.
+            uint32_t key = *reinterpret_cast<uint32_t*>(field + 0x08);
+            int32_t  whole = static_cast<int32_t>(value);
+            *reinterpret_cast<uint32_t*>(field + 0x04) =
+                (static_cast<uint32_t>(whole) ^ key) + key;
+            if (*reinterpret_cast<int32_t*>(field + 0x0C) != 0)
+                *reinterpret_cast<int32_t*>(field + 0x0C) = whole;
             return true;
         }
         case kStatFloat:
@@ -2236,8 +2240,11 @@ static float ReadExtraStat(void* hero, const ExtraStat& stat)
     {
         case kStatObscured: return ReadObscuredFloat(hero, stat.offset);
         case kStatObscuredInt:
-            return static_cast<float>(*reinterpret_cast<int32_t*>(field + 0x04) ^
-                                      *reinterpret_cast<int32_t*>(field + 0x08));
+        {
+            uint32_t key = *reinterpret_cast<uint32_t*>(field + 0x08);
+            uint32_t hidden = *reinterpret_cast<uint32_t*>(field + 0x04);
+            return static_cast<float>(static_cast<int32_t>((hidden - key) ^ key));
+        }
         case kStatFloat:    return *reinterpret_cast<float*>(field);
         case kStatInt:      return static_cast<float>(*reinterpret_cast<int32_t*>(field));
     }

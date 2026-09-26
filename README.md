@@ -104,6 +104,15 @@ lock ทำงานอยู่ใน hook ที่อยู่ในเกม
 
 ## เปลี่ยนแปลงใน v1.6.0
 
+- **Max stats เพิ่มเป็น 12 ค่า**: เพิ่ม Area of Effect 8, Skill Range 3, Projectile Count 5, Multistrike 3 (ของเดิม Attack Dmg 1,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10)
+  - offset ทุกตัวดึงมาจาก `Hero.gwo(StatType)` ซึ่งเป็น switch ที่เกมใช้เขียนค่าลง Unit เอง ไม่ได้เดา และยืนยัน Move/Cast Speed ที่หาไว้ใน v1.5.0 ซ้ำอีกรอบ
+  - Projectile Count กับ Multistrike ตั้งไว้น้อยตั้งใจ เพราะแต่ละหน่วยคือกระสุน/การตีจริง ใส่เยอะเป็นปัญหา FPS ไม่ใช่ความแรง
+  - stat ไม่ได้เป็น ObscuredFloat ทั้งหมด: Skill Range เป็น float ธรรมดา, Projectile Count กับ Multistrike เป็น int ธรรมดา (Multistrike เขียน 2 ที่), Additional EXP เป็น ObscuredInt
+  - **แก้บั๊ก ObscuredInt**: ACTk เก็บเป็น `hidden = (value ^ key) + key` ไม่ใช่ XOR ธรรมดา ตอนแรกอ่าน/เขียนผิดทำให้ค่าออกมาเป็นขยะ (เช่น `-1.85e+09` แทน `0`)
+  - lock แยกราย stat เพิ่มใน dropdown: Area of Effect / Skill Range / Projectile Count / Multistrike
+  - EXP (Increase EXP / Additional EXP) หา offset ได้แล้วแต่ยังไม่ใส่ใน Max stats เพราะเลเวลตันหมดแล้ว ทดสอบไม่ได้ (ยังเห็นค่าได้ใน Scan)
+- **ปุ่ม Self-check** (แท็บ Hero): หน้าเดียวจบ แทนการอ่าน log ยาว ๆ — hook ยังตอบไหม, เกมเดินเฟรมกี่ fps, il2cpp/Time/Stash resolve หรือยัง, HP และจำนวน lock ของฮีโร่แต่ละตัว, box API + error, จำนวนช่อง Stash
+
 - **เกมอัปเดตแล้วยังใช้ได้ทันที ไม่ต้องรอ trainer เวอร์ชันใหม่**: ถ้าไม่มี profile ไหนตรง trainer จะ scan หา detector ACTk ทั้ง 6 ตัวใน `GameAssembly.dll` เอง
   - ทั้ง 6 ตัวเรียงตัวเหมือนเดิมทุก build ตั้งแต่ 1.00.08 ถึง 1.2.8 (ระยะห่างจาก `ObscuredCheatingDetector.Check` เท่ากันเป๊ะ) จึงหาโดยจับคู่ prologue ทั้งชุด
   - ต้องเจอ **ตำแหน่งเดียว** และครบทั้ง 6 ตัวเท่านั้นถึงจะยอมใช้ ถ้าเจอหลายที่หรือไม่ครบจะไม่เดา (เขียน RET ผิดที่ = แก้โค้ดเกมมั่ว)

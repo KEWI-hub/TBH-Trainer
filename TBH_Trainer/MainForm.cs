@@ -440,8 +440,8 @@ internal sealed class MainForm : Form
         };
         _cmbHeroStat.Items.AddRange(["HP Lock", "Attack Speed Lock", "Attack Dmg Lock", "Crit Chance Lock",
             "Crit Dmg Lock", "CDR Lock", "Armor Lock", "Move Speed Lock", "Cast Speed Lock",
-            "Area of Effect Lock", "Increase EXP Lock", "Additional EXP Lock", "Skill Range Lock",
-            "Projectile Count Lock", "Multistrike Lock", "Clear Hero Locks"]);
+            "Area of Effect Lock", "Skill Range Lock", "Projectile Count Lock", "Multistrike Lock",
+            "Clear Hero Locks"]);
         _cmbHeroStat.SelectedIndex = 0;
 
         _txtHeroValue = MakeTxt(415, 48, 70);
@@ -476,7 +476,7 @@ internal sealed class MainForm : Form
         _btnSelfCheck.Click += (_, _) => OnSelfCheck();
         Label lblMax = new()
         {
-            Text = "Atk Dmg/Spd, Crit, CDR, Armor, Move, Cast, AoE, EXP, Skill Range, Projectiles, Multistrike",
+            Text = "Atk Dmg/Spd, Crit, CDR, Armor, Move, Cast, AoE, Skill Range, Projectiles, Multistrike",
             Location = new Point(14, 140), AutoSize = true, ForeColor = TextDim,
             Font = new Font("Segoe UI", 8f)
         };
@@ -1092,12 +1092,10 @@ internal sealed class MainForm : Form
             7 => 22,  // Move Speed
             8 => 23,  // Cast Speed
             9 => 25,  // Area of Effect
-            10 => 26, // Increase EXP
-            11 => 27, // Additional EXP
-            12 => 28, // Skill Range
-            13 => 29, // Projectile Count
-            14 => 30, // Multistrike
-            15 => 6,  // Clear locks
+            10 => 26, // Skill Range
+            11 => 27, // Projectile Count
+            12 => 28, // Multistrike
+            13 => 6,  // Clear locks
             _ => 0
         };
         string? result = _heroScanBridge.WriteValue(command, _cmbHeroIndex.SelectedIndex, value);
