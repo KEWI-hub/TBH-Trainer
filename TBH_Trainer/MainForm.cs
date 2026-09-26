@@ -34,6 +34,7 @@ internal sealed class MainForm : Form
     private TextBox _txtHeroValue = null!;
     private Button _btnWriteHeroStat = null!;
     private Button _btnMaxHeroStats = null!;
+    private Button _btnSelfCheck = null!;
     private CheckBox _chkOneHitKill = null!;
     private CheckBox _chkGodMode = null!;
     private CheckBox _chkAutoOpenBoxes = null!;
@@ -438,7 +439,9 @@ internal sealed class MainForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgInput, ForeColor = TextMain
         };
         _cmbHeroStat.Items.AddRange(["HP Lock", "Attack Speed Lock", "Attack Dmg Lock", "Crit Chance Lock",
-            "Crit Dmg Lock", "CDR Lock", "Armor Lock", "Move Speed Lock", "Cast Speed Lock", "Clear Hero Locks"]);
+            "Crit Dmg Lock", "CDR Lock", "Armor Lock", "Move Speed Lock", "Cast Speed Lock",
+            "Area of Effect Lock", "Increase EXP Lock", "Additional EXP Lock", "Skill Range Lock",
+            "Projectile Count Lock", "Multistrike Lock", "Clear Hero Locks"]);
         _cmbHeroStat.SelectedIndex = 0;
 
         _txtHeroValue = MakeTxt(415, 48, 70);
@@ -468,17 +471,20 @@ internal sealed class MainForm : Form
         _btnMaxHeroStats.Click += (_, _) => OnMaxHeroStats(true);
         Button btnClearMax = MakeBtn("Release", 200, 108, 70);
         btnClearMax.Click += (_, _) => OnMaxHeroStats(false);
+        _btnSelfCheck = MakeBtn("Self-check", 278, 108, 92);
+        _btnSelfCheck.Enabled = false;
+        _btnSelfCheck.Click += (_, _) => OnSelfCheck();
         Label lblMax = new()
         {
-            Text = "Atk Dmg, Atk Spd, Crit, Crit Dmg, CDR, Armor, Move Spd, Cast Spd",
-            Location = new Point(278, 115), AutoSize = true, ForeColor = TextDim,
+            Text = "Atk Dmg/Spd, Crit, CDR, Armor, Move, Cast, AoE, EXP, Skill Range, Projectiles, Multistrike",
+            Location = new Point(14, 140), AutoSize = true, ForeColor = TextDim,
             Font = new Font("Segoe UI", 8f)
         };
-        page.Controls.AddRange(new Control[] { _btnMaxHeroStats, btnClearMax, lblMax });
+        page.Controls.AddRange(new Control[] { _btnMaxHeroStats, btnClearMax, _btnSelfCheck, lblMax });
 
         _txtHeroReport = new TextBox
         {
-            Location = new Point(14, 140), Size = new Size(514, 432),
+            Location = new Point(14, 162), Size = new Size(514, 410),
             Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, ReadOnly = true,
             BackColor = Color.FromArgb(12, 13, 18), ForeColor = Color.FromArgb(120, 220, 200),
             Font = new Font("Consolas", 8.5f), BorderStyle = BorderStyle.FixedSingle
@@ -607,6 +613,7 @@ internal sealed class MainForm : Form
             _btnScanHeroes.Enabled = false;
             _btnWriteHeroStat.Enabled = false;
             _btnMaxHeroStats.Enabled = false;
+            _btnSelfCheck.Enabled = false;
             SetSpawnControlsEnabled(false);
             Log("Disconnected. The hook is idle now — it is safe to close the game.");
             return;
@@ -675,6 +682,7 @@ internal sealed class MainForm : Form
             _btnScanHeroes.Text = HeroApiAllowed ? "Scan active heroes" : "Dump hero layout";
             _btnWriteHeroStat.Enabled = HeroApiAllowed;
             _btnMaxHeroStats.Enabled = HeroApiAllowed;
+            _btnSelfCheck.Enabled = true;
             SetSpawnControlsEnabled(GameApiAllowed);
             _lblSpawnStatus.Text = GameApiAllowed
                 ? "Connect hook (enable speed or spawn)"
@@ -1001,6 +1009,39 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
+    /// Command 31: one page answering "is everything actually working?" — hook alive, game
+    /// running frames, which game APIs resolved, heroes and locks, boxes, stash.
+    /// </summary>
+    private void OnSelfCheck()
+    {
+        Log("--- Self-check ---");
+        Log($"  trainer v{AppInfo.Version} | game build: {(_buildDetected ? _buildProfile.VersionLabel : "unknown")}" +
+            $"{(_buildProfile.FromScan ? " (detectors found by scan)" : "")}");
+        Log($"  attached: {(_mem.IsAttached ? $"PID {_pid}" : "no")} | bridge: {(_bridge.IsConnected ? "connected" : "not connected")}");
+        if (!_bridge.IsConnected)
+        {
+            Log("  Press Connect first — the rest of the check needs the hook.");
+            return;
+        }
+        Log($"  hook heartbeat: {_bridge.Heartbeat} | il2cpp {_bridge.Il2CppReady} | Time {_bridge.TimeResolved} | Stash {_bridge.StashResolved}");
+
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("  ERROR: hero channel missing — restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        string? report = _heroScanBridge.WriteValue(31, 0, 0f, timeoutMs: 10000);
+        if (report == null)
+        {
+            Log("  ERROR: the hook did not answer (is the game running frames?).");
+            return;
+        }
+        foreach (string line in report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+            Log("  " + line.TrimEnd());
+    }
+
+    /// <summary>
     /// Command 24: sets every hero stat in the list to its maximum stable value on all
     /// three hero slots and keeps it locked (the hook re-applies it every ~0.2s, so heroes
     /// that spawn or revive later get it too). <paramref name="on"/> false releases them.
@@ -1050,7 +1091,13 @@ internal sealed class MainForm : Form
             6 => 11,  // Armor
             7 => 22,  // Move Speed
             8 => 23,  // Cast Speed
-            9 => 6,   // Clear locks
+            9 => 25,  // Area of Effect
+            10 => 26, // Increase EXP
+            11 => 27, // Additional EXP
+            12 => 28, // Skill Range
+            13 => 29, // Projectile Count
+            14 => 30, // Multistrike
+            15 => 6,  // Clear locks
             _ => 0
         };
         string? result = _heroScanBridge.WriteValue(command, _cmbHeroIndex.SelectedIndex, value);

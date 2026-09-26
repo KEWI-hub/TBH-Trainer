@@ -78,7 +78,9 @@ struct HeroScanState
     int32_t command;   // 0=scan, 1=current HP, 2=max HP, 3=attack damage, 4=attack speed, 5=both HP,
                        // 6=clear locks, 7=layout dump, 8=crit chance, 9=crit damage, 10=cooldown reduction,
                        // 11=armor, 12=one-hit kill toggle, 13=god mode toggle,
-                       // 22=move speed, 23=cast speed, 24=max stats (all heroes)
+                       // 22=move speed, 23=cast speed, 24=max stats (all heroes),
+                       // 25-30=area of effect / increase exp / additional exp / skill range /
+                       //       projectile count / multistrike, 31=self-check
     int32_t heroIndex;
     float   value;
     int32_t reserved;
@@ -255,8 +257,8 @@ struct HeroLocks
     float maxHpValue;
     float attackDamageValue;
     float attackSpeedValue;
-    bool  extra[6];        // Crit Chance, Crit Damage, Cooldown Reduction, Armor, Move Speed, Cast Speed
-    float extraValue[6];
+    bool  extra[12];       // one per entry in kExtraStats
+    float extraValue[12];
 };
 static HeroLocks g_heroLocks[3] = {};
 
@@ -264,40 +266,56 @@ static HeroLocks g_heroLocks[3] = {};
 // il2cpp — Unity tears its runtime down underneath us and the next call crashes the game.
 static volatile bool      g_shuttingDown   = false;
 
-// Extra ObscuredFloat stat locks on Unit (commands 8-11 and 22-23). Offsets match the
-// 1.00.09 dump and the 1.2.4 hero layout dump (Unit.bdxp / bdxq / bdxr / bdxn).
-// Move Speed (+0x154) and Cast Speed (+0x12C) were read off the 1.2.8 Unit property
-// getters: they sit between Armor (+0x140) and Critical Chance (+0x168) in the same
-// getter order the earlier builds used.
-static const int    kExtraStatCount = 6;
-static const size_t kExtraStatOffsets[kExtraStatCount] = { 0x168, 0x17C, 0x190, 0x140, 0x154, 0x12C };
-static const char*  kExtraStatNames[kExtraStatCount]   =
-    { "Critical Chance", "Critical Damage", "Cooldown Reduction", "Armor", "Move Speed", "Cast Speed" };
+// Unit stat fields, taken from Hero.gwo(StatType): that switch is what the game itself
+// runs when a stat changes, so every offset below is the field the game writes for that
+// StatType. Most are ObscuredFloat; Skill Range is a plain float and Projectile Count /
+// Multistrike are plain ints (Multistrike is stored twice, +0x27C then mirrored to +0x278).
+enum StatKind : uint8_t { kStatObscured = 0, kStatFloat = 1, kStatInt = 2, kStatObscuredInt = 3 };
 
-// Hero stat commands are not contiguous (12/13 are the combat toggles), so the two new
-// stats live on 22/23 and are mapped back to their slot in the tables above.
+struct ExtraStat
+{
+    size_t      offset;
+    size_t      mirror;     // second field the game keeps in sync (0 = none)
+    const char* name;
+    StatKind    kind;
+    float       maxValue;   // used by "max stats" (command 24)
+};
+
+// Order is fixed: commands 8-11 and 22-23 address the first six by index.
+static const ExtraStat kExtraStats[] =
+{
+    { 0x168, 0,     "Critical Chance",    kStatObscured, 1.0f },        // = 100%
+    { 0x17C, 0,     "Critical Damage",    kStatObscured, 100.0f },      // = 10000%
+    { 0x190, 0,     "Cooldown Reduction", kStatObscured, 10.0f },       // live heroes reach ~1.8
+    { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f },  // under the 1e7 sanity limit
+    { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f },       // live heroes reach ~30
+    { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f },       // live heroes reach ~2.4
+    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 8.0f },        // live heroes reach ~5.8
+    { 0x214, 0,     "Increase EXP",       kStatObscured, 10.0f },       // multiplier: live ~1.1-1.7
+    { 0x228, 0,     "Additional EXP",     kStatObscuredInt, 1000.0f },  // flat EXP per kill
+    { 0x274, 0,     "Skill Range",        kStatFloat,    3.0f },
+    { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
+    { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
+};
+static const int kExtraStatCount = static_cast<int>(sizeof(kExtraStats) / sizeof(kExtraStats[0]));
+
+// Hero stat commands are not contiguous (12/13 are the combat toggles), so the newer
+// stats live on 22-23 and 25+ and are mapped back to their slot in the table above.
 static int ExtraStatIndex(int32_t command)
 {
     if (command >= 8 && command <= 11) return command - 8;
     if (command == 22) return 4;   // Move Speed
     if (command == 23) return 5;   // Cast Speed
+    if (command >= 25 && command <= 30) return command - 25 + 6;
     return -1;
 }
 
-// "Max stats" (command 24). These are the highest values that stay stable in play:
-// the unit stats are ratios, and pushing them far past this makes cooldowns and
-// animation timings degenerate (0-length casts, heroes overshooting their target).
+// "Max stats" (command 24). These are the highest values that stay stable in play: the
+// stats are ratios, and pushing them far past this makes cooldowns and animation timings
+// degenerate. Projectile Count and Multistrike are deliberately small — every extra one
+// is a real projectile or a real hit, so a big number is a frame-rate problem, not power.
 static const float kMaxAttackDamage = 1000000.0f;   // damage numbers stay readable
 static const float kMaxAttackSpeed  = 50.0f;        // above ~50 gains nothing at 60 fps
-static const float kMaxExtraValues[kExtraStatCount] =
-{
-    1.0f,          // Critical Chance  = 100%
-    100.0f,        // Critical Damage  = 10000%
-    10.0f,         // Cooldown Reduction (live heroes reach ~1.8)
-    5000000.0f,    // Armor (under the hook's 1e7 re-apply sanity limit)
-    60.0f,         // Move Speed (live heroes reach ~30)
-    10.0f,         // Cast Speed (live heroes reach ~2.4)
-};
 
 // Combat toggles (commands 12 / 13, value != 0 = on).
 static volatile bool g_oneHitKill = false; // keep every live monster at 1 HP
@@ -2179,6 +2197,53 @@ static void ApplyGodModeAllHeroes()
     });
 }
 
+// Writes one stat, whichever way the game stores it.
+static bool WriteExtraStat(void* hero, const ExtraStat& stat, float value)
+{
+    if (!hero) return false;
+    uint8_t* field = reinterpret_cast<uint8_t*>(hero) + stat.offset;
+    switch (stat.kind)
+    {
+        case kStatObscured:
+            return WriteObscuredFloat(hero, stat.offset, value);
+        case kStatObscuredInt:
+        {
+            // ObscuredInt: the hidden value at +0x04 is xored with the key at +0x08.
+            int32_t key = *reinterpret_cast<int32_t*>(field + 0x08);
+            *reinterpret_cast<int32_t*>(field + 0x04) = static_cast<int32_t>(value) ^ key;
+            return true;
+        }
+        case kStatFloat:
+            *reinterpret_cast<float*>(field) = value;
+            return true;
+        case kStatInt:
+        {
+            int32_t whole = static_cast<int32_t>(value);
+            *reinterpret_cast<int32_t*>(field) = whole;
+            if (stat.mirror)
+                *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(hero) + stat.mirror) = whole;
+            return true;
+        }
+    }
+    return false;
+}
+
+static float ReadExtraStat(void* hero, const ExtraStat& stat)
+{
+    if (!hero) return 0.0f;
+    uint8_t* field = reinterpret_cast<uint8_t*>(hero) + stat.offset;
+    switch (stat.kind)
+    {
+        case kStatObscured: return ReadObscuredFloat(hero, stat.offset);
+        case kStatObscuredInt:
+            return static_cast<float>(*reinterpret_cast<int32_t*>(field + 0x04) ^
+                                      *reinterpret_cast<int32_t*>(field + 0x08));
+        case kStatFloat:    return *reinterpret_cast<float*>(field);
+        case kStatInt:      return static_cast<float>(*reinterpret_cast<int32_t*>(field));
+    }
+    return 0.0f;
+}
+
 static bool ApplyHeroLocks(int32_t heroIndex)
 {
     if (heroIndex < 0 || heroIndex >= 3) return false;
@@ -2189,7 +2254,7 @@ static bool ApplyHeroLocks(int32_t heroIndex)
     if (locks.attackDamage) WriteObscuredFloat(hero, 0x104, locks.attackDamageValue);
     if (locks.attackSpeed) WriteObscuredFloat(hero, 0x118, locks.attackSpeedValue);
     for (int i = 0; i < kExtraStatCount; ++i)
-        if (locks.extra[i]) WriteObscuredFloat(hero, kExtraStatOffsets[i], locks.extraValue[i]);
+        if (locks.extra[i]) WriteExtraStat(hero, kExtraStats[i], locks.extraValue[i]);
 
     if (locks.currentHp || locks.maxHp)
     {
@@ -2625,8 +2690,11 @@ static void BoxJobTick()
 
 static bool InstallSimUpdateHook();
 
+static volatile LONG g_frameCount = 0;
+
 static void HookedSimUpdate(void* self, const void* method)
 {
+    InterlockedIncrement(&g_frameCount);
     bool paused = g_shared && g_shared->trainerPaused;
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
     g_origSimUpdate(self, method);
@@ -2761,6 +2829,80 @@ static void InstallShutdownWatch()
     SetWindowsHookExW(WH_GETMESSAGE, ShutdownGetMsgHook, nullptr, mainThread);
 }
 
+// Command 31: self-check. Everything here is read-only: it answers the questions that
+// otherwise need a long trainer log ("is the hook alive", "did it find the game's APIs",
+// "are my locks on", "why is auto open boxes doing nothing").
+static void RunSelfCheck()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== TBH hook self-check ===\r\n");
+
+    LONG frames0 = g_frameCount;
+    Sleep(300);
+    LONG perSecond = (g_frameCount - frames0) * 1000 / 300;
+    bool paused = g_shared && g_shared->trainerPaused;
+    pos = ScanAppend(text, cap, pos,
+        "hook: %s | game frames: %s (~%ld/s) | build published by trainer: %d\r\n",
+        g_shuttingDown ? "STOPPED (saw the game closing)" : paused ? "idle (trainer disconnected)" : "running",
+        g_origSimUpdate ? (perSecond > 0 ? "yes" : "NO - the game is not calling Update") : "per-frame hook NOT installed",
+        perSecond, g_shared ? g_shared->buildId : 0);
+
+    int32_t flags = BuildStatusFlags();
+    pos = ScanAppend(text, cap, pos, "game APIs: il2cpp %s | Time.timeScale %s | stash/item %s\r\n",
+        (flags & 1) ? "ok" : "no", (flags & 2) ? "ok" : "no", (flags & 4) ? "ok" : "no");
+
+    void* stage = ResolveStageManager();
+    pos = ScanAppend(text, cap, pos, "StageManager: %s\r\n", stage ? "found" : "not in a stage yet");
+
+    int spawned = 0;
+    for (int32_t i = 0; i < 3; ++i)
+    {
+        void* hero = ResolveHeroByIndex(i);
+        if (!hero)
+        {
+            pos = ScanAppend(text, cap, pos, "  hero %d: empty slot\r\n", i + 1);
+            continue;
+        }
+        ++spawned;
+        void* heroClass = il2cpp_object_get_class ? il2cpp_object_get_class(hero) : nullptr;
+        void* healthField = FindFieldOnClassOrParents(heroClass, "UnitHealthController");
+        void* health = nullptr;
+        if (healthField) il2cpp_field_get_value(hero, healthField, &health);
+        float cur = 0.0f, max = 0.0f;
+        if (health)
+        {
+            cur = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + 0x40);
+            max = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + 0x4C);
+        }
+        const HeroLocks& locks = g_heroLocks[i];
+        int locked = (locks.currentHp ? 1 : 0) + (locks.maxHp ? 1 : 0) +
+                     (locks.attackDamage ? 1 : 0) + (locks.attackSpeed ? 1 : 0);
+        for (int k = 0; k < kExtraStatCount; ++k) locked += locks.extra[k] ? 1 : 0;
+        pos = ScanAppend(text, cap, pos, "  hero %d: HP %.6g / %.6g, %d lock(s) active\r\n",
+            i + 1, cur, max, locked);
+    }
+    pos = ScanAppend(text, cap, pos, "heroes spawned: %d of 3\r\n", spawned);
+
+    pos = ScanAppend(text, cap, pos, "god mode: %s | one-hit kill: %s\r\n",
+        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off");
+
+    bool boxApi = ResolveBoxApi();
+    pos = ScanAppend(text, cap, pos, "auto open boxes: %s | box API: %s%s%s | opened so far: %ld\r\n",
+        g_autoOpenBoxes ? "ON" : "off", boxApi ? "ok" : "NOT resolved",
+        boxApi ? "" : " - ", boxApi ? "" : g_boxError, g_boxOpened);
+
+    int32_t used = 0, unlocked = 0, total = 0;
+    if (StashSlotStats(&used, &unlocked, &total))
+        pos = ScanAppend(text, cap, pos, "stash: %d used of %d unlocked (%d slots exist)\r\n", used, unlocked, total);
+    else
+        pos = ScanAppend(text, cap, pos, "stash: slot API not resolved (normal until the game finishes loading)\r\n");
+
+    pos = ScanAppend(text, cap, pos, "\r\nSelf-check done.\r\n");
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
 static void RunHeroCommand()
 {
     if (!g_heroScan) return;
@@ -2817,19 +2959,27 @@ static void RunHeroCommand()
             for (int i = 0; i < kExtraStatCount; ++i)
             {
                 locks.extra[i] = on;
-                locks.extraValue[i] = kMaxExtraValues[i];
+                locks.extraValue[i] = kExtraStats[i].maxValue;
             }
             ApplyHeroLocks(h);   // heroes that are not spawned yet get it from the worker loop
         }
-        size_t n = on
-            ? ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
-                "OK: Max stats ON for all 3 heroes - Attack Damage %.6g, Attack Speed %.6g, "
-                "Crit Chance %.6g, Crit Damage %.6g, CDR %.6g, Armor %.6g, Move Speed %.6g, Cast Speed %.6g "
-                "(re-applied every ~0.2s, also to heroes that spawn or revive later)\r\n",
-                kMaxAttackDamage, kMaxAttackSpeed, kMaxExtraValues[0], kMaxExtraValues[1],
-                kMaxExtraValues[2], kMaxExtraValues[3], kMaxExtraValues[4], kMaxExtraValues[5])
-            : ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+        size_t n = 0;
+        if (on)
+        {
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                "OK: Max stats ON for all 3 heroes - Attack Damage %.6g, Attack Speed %.6g",
+                kMaxAttackDamage, kMaxAttackSpeed);
+            for (int i = 0; i < kExtraStatCount; ++i)
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n, ", %s %.6g",
+                    kExtraStats[i].name, kExtraStats[i].maxValue);
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                " (re-applied every ~0.2s, also to heroes that spawn or revive later)\r\n");
+        }
+        else
+        {
+            n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
                 "OK: Max stats OFF - stat locks released on all 3 heroes (values stay until the stage reloads)\r\n");
+        }
         g_heroScan->length = static_cast<int32_t>(n);
         g_heroScan->done = 1;
         return;
@@ -2842,7 +2992,7 @@ static void RunHeroCommand()
         int i = ExtraStatIndex(g_heroScan->command);
         g_heroLocks[g_heroScan->heroIndex].extra[i] = false;
         size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: UI Hero %d %s lock released\r\n",
-            g_heroScan->heroIndex + 1, kExtraStatNames[i]);
+            g_heroScan->heroIndex + 1, kExtraStats[i].name);
         g_heroScan->length = static_cast<int32_t>(n);
         g_heroScan->done = 1;
         return;
@@ -2911,8 +3061,8 @@ static void RunHeroCommand()
         else if (ExtraStatIndex(g_heroScan->command) >= 0)
         {
             int i = ExtraStatIndex(g_heroScan->command);
-            ok = WriteObscuredFloat(hero, kExtraStatOffsets[i], g_heroScan->value);
-            label = kExtraStatNames[i];
+            ok = WriteExtraStat(hero, kExtraStats[i], g_heroScan->value);
+            label = kExtraStats[i].name;
             if (ok)
             {
                 g_heroLocks[g_heroScan->heroIndex].extra[i] = true;
@@ -3083,16 +3233,30 @@ static void RunHeroScan()
         return;
     }
 
-    // All eight named offsets are confirmed against the Unit property getters; the
-    // remaining ObscuredFloats on Unit have no confirmed meaning yet.
-    static const struct { const char* name; size_t offset; } kStats[] =
+    // Every offset here comes from Hero.gwo(StatType), the game's own stat -> field switch.
+    static const ExtraStat kStats[] =
     {
-        { "AttackDamage", 0x104 }, { "AttackSpeed", 0x118 },
-        { "CastSpeed", 0x12C }, { "Armor", 0x140 },
-        { "MoveSpeed", 0x154 }, { "CriticalChance", 0x168 },
-        { "CriticalDamage", 0x17C }, { "CooldownReduction", 0x190 },
-        { "Unknown_1A4", 0x1A4 }, { "Unknown_1B8", 0x1B8 },
-        { "Unknown_1CC", 0x1CC }, { "Unknown_1E0", 0x1E0 },
+        { 0x104, 0,     "AttackDamage",             kStatObscured, 0 },
+        { 0x118, 0,     "AttackSpeed",              kStatObscured, 0 },
+        { 0x12C, 0,     "CastSpeed",                kStatObscured, 0 },
+        { 0x140, 0,     "Armor",                    kStatObscured, 0 },
+        { 0x154, 0,     "MovementSpeed",            kStatObscured, 0 },
+        { 0x168, 0,     "CriticalChance",           kStatObscured, 0 },
+        { 0x17C, 0,     "CriticalDamage",           kStatObscured, 0 },
+        { 0x190, 0,     "CooldownReduction",        kStatObscured, 0 },
+        { 0x1A4, 0,     "DamageReduction",          kStatObscured, 0 },
+        { 0x1B8, 0,     "DamageAbsorption",         kStatObscured, 0 },
+        { 0x1CC, 0,     "DodgeChance",              kStatObscured, 0 },
+        { 0x1E0, 0,     "AreaOfEffect",             kStatObscured, 0 },
+        { 0x204, 0,     "BaseAttackCountReduction", kStatObscuredInt, 0 },
+        { 0x214, 0,     "IncreaseExpAmount",        kStatObscured, 0 },
+        { 0x228, 0,     "AdditionalExp",            kStatObscuredInt, 0 },
+        { 0x25C, 0,     "DamageAddition",           kStatFloat,    0 },
+        { 0x26C, 0,     "ProjectileCount",          kStatInt,      0 },
+        { 0x274, 0,     "SkillRangeExpansion",      kStatFloat,    0 },
+        { 0x27C, 0x278, "Multistrike",              kStatInt,      0 },
+        { 0x29C, 0,     "BlockChance",              kStatFloat,    0 },
+        { 0x2A0, 0,     "ElementalBlockChance",     kStatFloat,    0 },
     };
 
     for (int32_t i = 0; i < count; ++i)
@@ -3110,9 +3274,11 @@ static void RunHeroScan()
             i, i + 1, (unsigned long long)hero, className ? className : "?", isHero ? 1 : 0);
 
         for (const auto& stat : kStats)
-            pos = ScanAppend(text, cap, pos, "  field %-26s +0x%03llX decrypt=%.6g fake=%.6g\r\n",
-                stat.name, (unsigned long long)stat.offset, ReadObscuredFloat(hero, stat.offset),
-                ReadObscuredFloatFake(hero, stat.offset));
+            pos = ScanAppend(text, cap, pos, "  field %-26s +0x%03llX %-9s = %.6g\r\n",
+                stat.name, (unsigned long long)stat.offset,
+                stat.kind == kStatObscured ? "obscured" : stat.kind == kStatObscuredInt ? "obsc.int"
+                    : stat.kind == kStatInt ? "int" : "float",
+                ReadExtraStat(hero, stat));
         void* healthField = FindFieldOnClassOrParents(heroClass, "UnitHealthController");
         void* health = nullptr;
         if (healthField) il2cpp_field_get_value(hero, healthField, &health);
@@ -3539,6 +3705,13 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 RunHeroScan();
             else if (g_heroScan->command == 7)
                 RunHeroLayoutDump();
+            else if (g_heroScan->command == 31)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunSelfCheck();
+            }
             else if (g_heroScan->command == 19)
             {
                 g_heroScan->done = 0;
