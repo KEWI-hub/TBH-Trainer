@@ -60,6 +60,12 @@ internal sealed class GameBuildProfile
     /// <summary>rz.ije(MoveRequest, Action&lt;MoveResult&gt;): drag &amp; drop between slots (bag -> stash). 0 = n/a.</summary>
     public int SlotMoveRva { get; init; }
 
+    /// <summary>int AccountStatus.llw(EAccountStatus) - reads one account upgrade value.</summary>
+    public int AccStatusGetRva { get; init; }
+
+    /// <summary>void AccountStatus.llx(EAccountStatus, int) - writes one account upgrade value.</summary>
+    public int AccStatusSetRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -273,6 +279,8 @@ internal sealed class GameBuildProfile
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
         BoxCountRva   = 0x96D650,   // wh.uy.jig(EBoxType, EContentType) -> box count
         SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
+        AccStatusGetRva = 0xA8F440, // AccountStatus.llw(EAccountStatus) -> int
+        AccStatusSetRva = 0xA8F4D0, // AccountStatus.llx(EAccountStatus, int)
         StashNamespace = "wh",
         GameApiVerified = true,
         ItemScanSupported = false,

@@ -40,6 +40,8 @@ internal sealed class MainForm : Form
     private CheckBox _chkAutoOpenBoxes = null!;
     private CheckBox _chkBagToStash = null!;
     private Button _btnBagToStashNow = null!;
+    private Button _btnChestUpgrades = null!;
+    private Button _btnChestLog = null!;
 
     private TextBox _txtItemKey = null!;
     private ComboBox _cmbGrade = null!;
@@ -334,7 +336,7 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Stash Item Spawn (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 210);
+        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 205);
         grp6.Controls.Add(new Label
         {
             Text = "Each ItemKey has a fixed rarity in the catalog. Grade picks another row (e.g. 304061 Immortal → Cosmic uses 309161). Export catalog to browse IDs.",
@@ -396,11 +398,17 @@ internal sealed class MainForm : Form
         };
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
 
-        _btnBagToStashNow = MakeBtn("Empty bag now", 15, 166, 150);
+        _btnBagToStashNow = MakeBtn("Empty bag now", 15, 162, 150);
         _btnBagToStashNow.Enabled = false;
         _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
+        _btnChestUpgrades = MakeBtn("Chest upgrades", 175, 162, 140);
+        _btnChestUpgrades.Enabled = false;
+        _btnChestUpgrades.Click += (_, _) => OnChestUpgrades();
+        _btnChestLog = MakeBtn("Chest log", 325, 162, 120);
+        _btnChestLog.Enabled = false;
+        _btnChestLog.Click += (_, _) => OnChestLog();
 
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _lblSpawnStatus });
+        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog, _lblSpawnStatus });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -873,6 +881,8 @@ internal sealed class MainForm : Form
         _btnSpawnItem.Enabled = enabled;
         _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
         _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
+        _btnChestUpgrades.Enabled = enabled && _buildProfile.AccStatusGetRva > 0;
+        _btnChestLog.Enabled = enabled && _buildProfile.BoxCountRva > 0;
         _btnExportCatalog.Enabled = enabled;
     }
 
@@ -1056,6 +1066,49 @@ internal sealed class MainForm : Form
             _btnBagToStashNow.Enabled = true;
         }
     }
+
+    /// <summary>
+    /// Reads the game's own chest-drop and Plague-chest account upgrades. It only ever reports
+    /// until a design maximum is filled in for an upgrade, so nothing is written by surprise.
+    /// </summary>
+    private void OnChestUpgrades()
+    {
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        _btnChestUpgrades.Enabled = false;
+        try
+        {
+            Log("--- Chest upgrades ---");
+            string? result = _heroScanBridge.WriteValue(34, 0, 1f, timeoutMs: 15000);
+            Log(result?.Trim() ?? "ERROR: the hook did not answer.");
+        }
+        finally
+        {
+            _btnChestUpgrades.Enabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Read-only timeline of chests landing and being opened, built from the counts the game
+    /// keeps. Hold Shift while clicking to clear it and start a fresh run.
+    /// </summary>
+    private void OnChestLog()
+    {
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        bool clear = (ModifierKeys & Keys.Shift) == Keys.Shift;
+        string? result = _heroScanBridge.WriteValue(37, 0, clear ? 1f : 0f, timeoutMs: 15000);
+        Log(result?.Trim() ?? "ERROR: the hook did not answer.");
+    }
+
 
     private void OnSelfCheck()
     {

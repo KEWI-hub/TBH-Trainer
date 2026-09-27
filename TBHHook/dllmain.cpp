@@ -46,14 +46,16 @@ struct SharedState
     int32_t rvaBoxCount;   // 0x5C  static int wh.uy.jif(EBoxType, EContentType) -> unopened boxes
     int32_t trainerPaused; // 0x60  1 = trainer disconnected: stop every call into the game
     int32_t rvaSlotMove;   // 0x64  rz.ije(MoveRequest, Action<MoveResult>) -> player drag & drop
+    int32_t rvaAccStatusGet; // 0x68  int  AccountStatus.llw(EAccountStatus)
+    int32_t rvaAccStatusSet; // 0x6C  void AccountStatus.llx(EAccountStatus, int)
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 104, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 112, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 104;
+static const int      kMapSize = 112;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -318,7 +320,7 @@ static const float kMaxAttackSpeed  = 50.0f;        // above ~50 gains nothing a
 
 // Combat toggles (commands 12 / 13, value != 0 = on).
 static volatile bool g_oneHitKill = false; // keep every live monster at 1 HP
-static volatile bool g_godMode    = false; // refill hero HP every ~33ms instead of ~0.2s
+static volatile bool g_godMode    = false; // refill hero HP every frame, and every ~33ms
 
 // -------------------------------------------------------------------------
 
@@ -2630,6 +2632,19 @@ static int32_t BoxCount(void* stageBox)
     return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
 }
 
+// How many unopened chests of one kind the account is holding. EBoxType is
+// NORMAL 0 / BOSS 1 / ACTBOSS 2, EContentType is NONE 0 / PLAGUE 1.
+static int32_t ChestsHeld(int32_t boxType, int32_t contentType)
+{
+    if (!g_box.count) ResolveBoxApi();   // may be called before anything else touched the boxes
+    if (!g_box.count) return -1;
+    void* args[2] = { &boxType, &contentType };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(g_box.count, nullptr, args, &exc);
+    if (exc || !boxed) return -1;
+    return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+}
+
 static ULONGLONG g_boxNextCheck  = 0;
 static ULONGLONG g_boxReadyAt    = 0;      // 0 = no box seen yet
 static ULONGLONG g_boxPauseUntil = 0;
@@ -2757,7 +2772,8 @@ static bool ResolveMoveApi()
 }
 
 // Main thread only. Returns false if the call could not be made or threw.
-static bool MoveSlot(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t dstIndex, int32_t quantity)
+static bool MoveSlot(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t dstIndex,
+                     int32_t quantity, int32_t moveType = 0)
 {
     void* rz = nullptr;
     void* uidMethod = nullptr;
@@ -2772,11 +2788,28 @@ static bool MoveSlot(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t
     il2cpp_runtime_invoke(ctor, cb, ctorArgs, &exc);
     if (exc) return false;
 
-    MoveRequestNative req = { srcType, srcIndex, dstType, dstIndex, 0, quantity };
+    MoveRequestNative req = { srcType, srcIndex, dstType, dstIndex, moveType, quantity };
     void* args[2] = { &req, cb };
     exc = nullptr;
     il2cpp_runtime_invoke(g_moveMethod, rz, args, &exc);
     return exc == nullptr;
+}
+
+// A request that does not throw is not the same as a move that happened: some targets accept
+// the call and quietly ignore it. This confirms the item really left the source slot.
+static bool MoveSlotVerified(int32_t srcType, int32_t srcIndex, int32_t dstType, int32_t dstIndex,
+                             int32_t quantity, int32_t moveType = 0)
+{
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod)) return false;
+    bool failed = false;
+    uint64_t before = SlotUid(rz, uidMethod, srcType, srcIndex, &failed);
+    if (failed || !before) return false;
+    if (!MoveSlot(srcType, srcIndex, dstType, dstIndex, quantity, moveType)) return false;
+    failed = false;
+    uint64_t after = SlotUid(rz, uidMethod, srcType, srcIndex, &failed);
+    return !failed && after != before;
 }
 
 // ---------------------------------------------------------------------------------
@@ -2934,12 +2967,153 @@ static void BagMoveTick()
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Chest log (command 37). The held-chest counts are the only honest record of a drop:
+// the count goes up when a chest lands and down when one is opened. Sampling them once a
+// second on the main thread turns that into a timeline of what the run actually produced,
+// which is otherwise impossible to see - chests vanish into the auto-opener.
+//
+// Nothing here changes anything in the game. It only reads counts the game already keeps.
+// ---------------------------------------------------------------------------------
+struct ChestKind { int32_t boxType; int32_t contentType; const char* name; };
+static const ChestKind kChestKinds[] = {
+    { 0, 1, "Plague normal"    },
+    { 1, 1, "Plague stage boss" },
+    { 2, 1, "Plague act boss"  },
+    { 0, 0, "Normal"           },
+    { 1, 0, "Stage boss"       },
+    { 2, 0, "Act boss"         },
+};
+static const int kChestKindCount = sizeof(kChestKinds) / sizeof(kChestKinds[0]);
+
+struct ChestLogEntry
+{
+    ULONGLONG when;      // GetTickCount64 when it changed
+    int32_t   kind;      // index into kChestKinds
+    int32_t   from, to;
+};
+
+static const int   kChestLogMax = 200;
+static ChestLogEntry g_chestLog[kChestLogMax];
+static volatile LONG g_chestLogCount = 0;   // total ever recorded, may exceed the ring
+static int32_t   g_chestLast[kChestKindCount];
+static bool      g_chestLastValid = false;
+static ULONGLONG g_chestNextSample = 0;
+static ULONGLONG g_chestStarted = 0;
+static volatile LONG g_chestDropped[kChestKindCount];   // chests seen landing
+static volatile LONG g_chestOpened[kChestKindCount];    // chests seen leaving
+
+static void ChestLogTick()
+{
+    ULONGLONG now = GetTickCount64();
+    if (now < g_chestNextSample) return;
+    g_chestNextSample = now + 1000;
+    if (!g_chestStarted) g_chestStarted = now;
+
+    int32_t cur[kChestKindCount];
+    for (int i = 0; i < kChestKindCount; ++i)
+    {
+        cur[i] = ChestsHeld(kChestKinds[i].boxType, kChestKinds[i].contentType);
+        if (cur[i] < 0) return;    // API not ready yet: take no sample at all
+    }
+
+    if (!g_chestLastValid)
+    {
+        for (int i = 0; i < kChestKindCount; ++i) g_chestLast[i] = cur[i];
+        g_chestLastValid = true;
+        return;
+    }
+
+    for (int i = 0; i < kChestKindCount; ++i)
+    {
+        if (cur[i] == g_chestLast[i]) continue;
+        if (cur[i] > g_chestLast[i]) InterlockedExchangeAdd(&g_chestDropped[i], cur[i] - g_chestLast[i]);
+        else                          InterlockedExchangeAdd(&g_chestOpened[i], g_chestLast[i] - cur[i]);
+
+        LONG slot = InterlockedIncrement(&g_chestLogCount) - 1;
+        ChestLogEntry& e = g_chestLog[slot % kChestLogMax];
+        e.when = now;
+        e.kind = i;
+        e.from = g_chestLast[i];
+        e.to = cur[i];
+        g_chestLast[i] = cur[i];
+    }
+}
+
+// Command 37: print the log. value != 0 clears it afterwards.
+static void RunChestLog(bool clear)
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== Chest log ===\r\n");
+
+    LONG total = g_chestLogCount;
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG ran = g_chestStarted ? (now - g_chestStarted) / 1000 : 0;
+    pos = ScanAppend(text, cap, pos, "watching for %llu:%02llu, %ld change(s) recorded\r\n\r\n",
+        ran / 60, ran % 60, total);
+
+    pos = ScanAppend(text, cap, pos, "totals since the hook started:\r\n");
+    for (int i = 0; i < kChestKindCount; ++i)
+    {
+        LONG got = g_chestDropped[i], used = g_chestOpened[i];
+        if (!got && !used) continue;
+        int32_t held = ChestsHeld(kChestKinds[i].boxType, kChestKinds[i].contentType);
+        pos = ScanAppend(text, cap, pos, "  %-18s dropped %ld, opened %ld, holding %d\r\n",
+            kChestKinds[i].name, got, used, held);
+    }
+    if (ran > 0)
+    {
+        LONG plague = g_chestDropped[0] + g_chestDropped[1] + g_chestDropped[2];
+        if (plague > 0)
+            pos = ScanAppend(text, cap, pos,
+                "  plague chests: %ld in %llu:%02llu = one every %llu s\r\n",
+                plague, ran / 60, ran % 60, ran / (ULONGLONG)plague);
+    }
+
+    LONG shown = total < kChestLogMax ? total : kChestLogMax;
+    LONG first = total - shown;
+    pos = ScanAppend(text, cap, pos, "\r\nmost recent %ld change(s):\r\n", shown);
+    for (LONG k = first; k < total; ++k)
+    {
+        const ChestLogEntry& e = g_chestLog[k % kChestLogMax];
+        ULONGLONG at = (e.when - g_chestStarted) / 1000;
+        pos = ScanAppend(text, cap, pos, "  [%llu:%02llu] %-18s %d -> %d  (%s)\r\n",
+            at / 60, at % 60, kChestKinds[e.kind].name, e.from, e.to,
+            e.to > e.from ? "dropped" : "opened");
+        if (pos > cap - 512) { pos = ScanAppend(text, cap, pos, "  ...\r\n"); break; }
+    }
+    if (total == 0)
+        pos = ScanAppend(text, cap, pos, "  nothing yet - play a stage and check again.\r\n");
+
+    if (clear)
+    {
+        InterlockedExchange(&g_chestLogCount, 0);
+        for (int i = 0; i < kChestKindCount; ++i)
+        {
+            InterlockedExchange(&g_chestDropped[i], 0);
+            InterlockedExchange(&g_chestOpened[i], 0);
+        }
+        g_chestStarted = now;
+        pos = ScanAppend(text, cap, pos, "\r\nLog cleared.\r\n");
+    }
+
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
 static volatile LONG g_frameCount = 0;
 
 static void HookedSimUpdate(void* self, const void* method)
 {
     InterlockedIncrement(&g_frameCount);
     bool paused = g_shared && g_shared->trainerPaused;
+    if (g_godMode && !g_shuttingDown && !paused)
+    {
+        ApplyGodModeAllHeroes();
+        for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
+    }
+    if (!g_shuttingDown && !paused) ChestLogTick();
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
     if (g_autoBagMove && !g_shuttingDown && !paused) BagMoveTick();
     g_origSimUpdate(self, method);
@@ -3016,6 +3190,318 @@ static bool InstallSimUpdateHook()
 
 // Background work only runs while the game is not closing. (No frame-based check: a paused
 // or hidden UI component must never stall hero locks and trainer commands.)
+// ---------------------------------------------------------------------------------
+// Account upgrades (command 34). The game keeps one int per EAccountStatus in
+// AccountStatus (a Dictionary<EAccountStatus, ObscuredInt>), and five of those entries
+// are the levers this trainer cares about: two raise the chance a killed monster leaves
+// a chest, three raise how many chests one Plaguelands run may hand out. Writing them
+// goes through the game's own get/set pair, so the stored value keeps the ObscuredInt
+// encoding and the anti-cheat hash the game expects.
+//
+// AccountStatus and EAccountStatus keep their real names across builds. The manager
+// MonoBehaviour that owns the instance does not, so it is found by the field it holds
+// (the only field of type AccountStatus in the game) and its instance by the static
+// singleton field the manager keeps of its own type.
+// ---------------------------------------------------------------------------------
+struct AccountUpgrade
+{
+    int32_t     id;        // EAccountStatus
+    const char* name;
+    int32_t     cap;       // 0 = report only, the design maximum is not known yet
+    bool        perMille;  // true = the stored value is tenths of a percent
+};
+
+// EAccountStatus: 29 DropChanceNormalChestPercent, 30 DropChanceStageBossChestPercent,
+// 42 MaxAmountPlagueNormalChest, 43 MaxAmountPlagueStageBossChest,
+// 44 MaxAmountPlagueActBossChest.
+// The two drop-chance entries are read as value/1000 and multiply the stage's own drop
+// rate (bbd.lpn does rate * (1 + value/1000)), so 4910 means "+491.0%". The three Plague
+// entries are a plain count: how many chests one Plaguelands run may hand out.
+// "cap" is the value the upgrade is set to, and 0 means report only.
+//
+// Writing 10 into the three Plague entries stopped chests dropping at all, so the stored
+// number is not a count of chests: 10 chests is what the upgrade screen promises, but the
+// value the game keeps here is something else - an upgrade level, most likely - and 10 is not
+// a row the game has. They are set back to 5, what the account held before the trainer
+// touched them, and stay there until the meaning of the number is actually established.
+static AccountUpgrade g_accountUpgrades[] = {
+    { 29, "Chest drop chance, normal monster", 0, true  },
+    { 30, "Chest drop chance, stage boss",     0, true  },
+    { 42, "Plague chests, normal monster",     5, false },
+    { 43, "Plague chests, stage boss",         5, false },
+    { 44, "Plague chests, act boss",           5, false },
+};
+static const int kAccountUpgradeCount = sizeof(g_accountUpgrades) / sizeof(g_accountUpgrades[0]);
+
+struct AccountApi
+{
+    void* managerClass  = nullptr;   // the obfuscated MonoBehaviour holding AccountStatus
+    void* statusField   = nullptr;   // managerClass's field of type AccountStatus
+    void* singleton     = nullptr;   // managerClass's static field of its own type
+    void* getValue      = nullptr;   // int  AccountStatus.llw(EAccountStatus)
+    void* setValue      = nullptr;   // void AccountStatus.llx(EAccountStatus, int)
+};
+static AccountApi g_acc;
+static char g_accError[192] = {};
+
+// il2cpp_type_get_name returns "TaskbarHero.StatusSystem.AccountStatus"; everything below
+// wants the last segment, so that "AccountStatus" does not also match "EAccountStatus" or
+// "AccountStatusCategoryData".
+static bool TypeNameIs(const void* type, const char* simpleName)
+{
+    if (!type || !il2cpp_type_get_name) return false;
+    char* tn = il2cpp_type_get_name(const_cast<void*>(type));
+    bool match = false;
+    if (tn)
+    {
+        const char* dot = strrchr(tn, '.');
+        match = strcmp(dot ? dot + 1 : tn, simpleName) == 0;
+        if (il2cpp_free) il2cpp_free(tn);
+    }
+    return match;
+}
+
+// The manager is the one class in the game that keeps a field of type AccountStatus.
+static bool FindAccountManager()
+{
+    if (g_acc.managerClass) return true;
+    if (!il2cpp_domain_get_assemblies || !il2cpp_assembly_get_image ||
+        !il2cpp_image_get_class_count || !il2cpp_image_get_class || !il2cpp_class_get_fields ||
+        !il2cpp_field_get_type || !il2cpp_type_get_name || !il2cpp_field_get_flags ||
+        !il2cpp_class_get_name)
+    {
+        strcpy_s(g_accError, "il2cpp reflection API missing");
+        return false;
+    }
+
+    size_t count = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(g_domain, &count);
+    for (size_t a = 0; a < count; ++a)
+    {
+        void* image = il2cpp_assembly_get_image(assemblies[a]);
+        if (!image) continue;
+        size_t classes = il2cpp_image_get_class_count(image);
+        for (size_t c = 0; c < classes; ++c)
+        {
+            void* klass = il2cpp_image_get_class(image, c);
+            if (!klass) continue;
+            void* iter = nullptr;
+            void* field = nullptr;
+            void* found = nullptr;
+            while ((field = il2cpp_class_get_fields(klass, &iter)) != nullptr)
+            {
+                if (il2cpp_field_get_flags(field) & 0x0010) continue;   // skip statics
+                if (TypeNameIs(il2cpp_field_get_type(field), "AccountStatus")) { found = field; break; }
+            }
+            if (!found) continue;
+
+            g_acc.managerClass = klass;
+            g_acc.statusField  = found;
+
+            // ... and its instance lives in the static field it keeps of its own type.
+            const char* own = il2cpp_class_get_name(klass);
+            iter = nullptr;
+            while ((field = il2cpp_class_get_fields(klass, &iter)) != nullptr)
+            {
+                if (!(il2cpp_field_get_flags(field) & 0x0010)) continue;   // statics only
+                if (own && TypeNameIs(il2cpp_field_get_type(field), own)) { g_acc.singleton = field; break; }
+            }
+            return true;
+        }
+    }
+    strcpy_s(g_accError, "no class in the game holds an AccountStatus field");
+    return false;
+}
+
+// The live AccountStatus object, or null while the game is still loading the account.
+static void* ResolveAccountStatus()
+{
+    if (!FindAccountManager()) return nullptr;
+
+    if (!g_acc.getValue && g_shared && g_shared->rvaAccStatusGet > 0)
+        g_acc.getValue = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaAccStatusGet), 1, nullptr);
+    if (!g_acc.setValue && g_shared && g_shared->rvaAccStatusSet > 0)
+        g_acc.setValue = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaAccStatusSet), 2, nullptr);
+    if (!g_acc.getValue)
+    {
+        strcpy_s(g_accError, "the account-status read method is not mapped on this build");
+        return nullptr;
+    }
+
+    void* manager = nullptr;
+    if (g_acc.singleton && il2cpp_field_static_get_value)
+        il2cpp_field_static_get_value(g_acc.singleton, &manager);
+    if (!manager && g_box.findObjects && il2cpp_class_get_type && il2cpp_type_get_object)
+    {
+        // No singleton yet: fall back to the scene, the same way auto open boxes does.
+        void* typeObject = il2cpp_type_get_object(il2cpp_class_get_type(g_acc.managerClass));
+        void* args[1] = { typeObject };
+        void* exc = nullptr;
+        void* found = typeObject ? il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc) : nullptr;
+        if (!exc && found && ManagedArrayLength(found) > 0) manager = ReadManagedArrayRef(found, 0);
+    }
+    if (!manager)
+    {
+        strcpy_s(g_accError, "the account manager is not in the scene yet (load a save first)");
+        return nullptr;
+    }
+
+    void* status = nullptr;
+    il2cpp_field_get_value(manager, g_acc.statusField, &status);
+    if (!status) strcpy_s(g_accError, "the account has no status table yet");
+    return status;
+}
+
+static bool ReadAccountValue(void* status, int32_t id, int32_t* outValue)
+{
+    int32_t idArg = id;
+    void* args[1] = { &idArg };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(g_acc.getValue, status, args, &exc);
+    if (exc || !boxed) return false;
+    *outValue = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+    return true;
+}
+
+static bool WriteAccountValue(void* status, int32_t id, int32_t value)
+{
+    if (!g_acc.setValue) return false;
+    int32_t idArg = id, valueArg = value;
+    void* args[2] = { &idArg, &valueArg };
+    void* exc = nullptr;
+    il2cpp_runtime_invoke(g_acc.setValue, status, args, &exc);
+    return exc == nullptr;
+}
+
+// Asks the game where its own ceiling is: write something absurd, read back what the game
+// kept, then put the original value straight back. If the game clamps, what it clamped to is
+// the design maximum - the only number this trainer is willing to set. If it keeps the absurd
+// value there is no ceiling in the game at all, and nothing gets raised.
+static void RunCeilingProbe()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== where the game clamps each upgrade ===" "\r\n");
+
+    void* status = ResolveAccountStatus();
+    if (!status)
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: %s" "\r\n", g_accError);
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    const int32_t kAbsurd = 1000000000;
+    for (int i = 0; i < kAccountUpgradeCount; ++i)
+    {
+        const AccountUpgrade& up = g_accountUpgrades[i];
+        int32_t original = 0;
+        if (!ReadAccountValue(status, up.id, &original))
+        {
+            pos = ScanAppend(text, cap, pos, "  %-34s : could not be read" "\r\n", up.name);
+            continue;
+        }
+
+        int32_t kept = original;
+        if (WriteAccountValue(status, up.id, kAbsurd)) ReadAccountValue(status, up.id, &kept);
+
+        // Put it back before anything else happens, and say so if that fails.
+        bool restored = WriteAccountValue(status, up.id, original);
+        int32_t now = original;
+        if (restored) ReadAccountValue(status, up.id, &now);
+
+        if (kept >= kAbsurd)
+            pos = ScanAppend(text, cap, pos,
+                "  %-34s : no ceiling - the game kept %d" "\r\n", up.name, kept);
+        else
+            pos = ScanAppend(text, cap, pos,
+                "  %-34s : clamped to %d (was %d)" "\r\n", up.name, kept, original);
+
+        if (!restored || now != original)
+            pos = ScanAppend(text, cap, pos,
+                "    WARNING: could not put %d back, it now reads %d" "\r\n", original, now);
+    }
+
+    pos = ScanAppend(text, cap, pos,
+        "\r\n" "Every value was restored. Nothing was left raised." "\r\n");
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
+// Command 34. value 0 reports, value 1 raises every upgrade that has a known cap.
+static void RunAccountUpgrades(bool apply)
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== Chest upgrades (the game's own account values) ===\r\n");
+    pos = ScanAppend(text, cap, pos,
+        "Chests stop dropping once the held pile reaches its limit - open some and they\r\n"
+        "start again. The limit is NOT the number printed here: that value reads 5 while\r\n"
+        "the real limit is 20, and it never moved while chests were being collected, so it\r\n"
+        "is something else (an upgrade level, most likely).\r\n\r\n");
+
+    void* status = ResolveAccountStatus();
+    if (!status)
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: %s\r\n", g_accError);
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    int changed = 0, unknown = 0;
+    for (int i = 0; i < kAccountUpgradeCount; ++i)
+    {
+        const AccountUpgrade& up = g_accountUpgrades[i];
+        int32_t value = 0;
+        if (!ReadAccountValue(status, up.id, &value))
+        {
+            pos = ScanAppend(text, cap, pos, "  %-34s : could not be read\r\n", up.name);
+            continue;
+        }
+        if (!apply || up.cap <= 0 || value == up.cap)
+        {
+            if (up.cap <= 0) ++unknown;
+            const char* note = up.cap <= 0 ? "   (reporting only)"
+                             : value == up.cap ? "   (already correct)" : "";
+            if (up.perMille)
+                pos = ScanAppend(text, cap, pos, "  %-34s : %d  = +%.1f%%%s\r\n",
+                    up.name, value, value / 10.0, note);
+            else
+            {
+                int32_t held = ChestsHeld(up.id - 42, 1);   // 42/43/44 -> NORMAL/BOSS/ACTBOSS
+                if (held < 0)
+                    pos = ScanAppend(text, cap, pos, "  %-34s : held count unavailable (stored value %d)%s\r\n",
+                        up.name, value, note);
+                else
+                    pos = ScanAppend(text, cap, pos, "  %-34s : holding %d chest(s)   (stored value %d)%s\r\n",
+                        up.name, held, value, note);
+            }
+            continue;
+        }
+        int32_t after = value;
+        if (WriteAccountValue(status, up.id, up.cap) && ReadAccountValue(status, up.id, &after) && after == up.cap)
+        {
+            ++changed;
+            pos = ScanAppend(text, cap, pos, "  %-34s : %d -> %d\r\n", up.name, value, after);
+        }
+        else
+            pos = ScanAppend(text, cap, pos, "  %-34s : %d, the write did not stick (now %d)\r\n",
+                up.name, value, after);
+    }
+
+    if (unknown)
+        pos = ScanAppend(text, cap, pos,
+            "\r\n%d upgrade(s) are read-only: the game has no ceiling for them, so there is\r\n"
+            "no honest value to write.\r\n", unknown);
+    if (apply && changed)
+        pos = ScanAppend(text, cap, pos, "\r\n%d upgrade(s) set. They are account values, so they apply from the next run.\r\n", changed);
+
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
 static bool GameAlive()
 {
     return !g_shuttingDown;
@@ -3140,6 +3626,12 @@ static void RunSelfCheck()
     pos = ScanAppend(text, cap, pos, "bag to stash: %s | bag free slots: %d | moved so far: %ld%s%s\r\n",
         g_autoBagMove ? "ON" : "off", BagFreeSlots(), g_bagMoved,
         g_bagError[0] ? " | last note: " : "", g_bagError);
+
+    int32_t heldNormal = ChestsHeld(0, 1), heldBoss = ChestsHeld(1, 1), heldAct = ChestsHeld(2, 1);
+    if (heldNormal >= 0 || heldBoss >= 0 || heldAct >= 0)
+        pos = ScanAppend(text, cap, pos,
+            "plague chests held: %d normal, %d stage boss, %d act boss (they stop dropping when full)\r\n",
+            heldNormal, heldBoss, heldAct);
 
     int32_t used = 0, unlocked = 0, total = 0;
     if (StashSlotStats(&used, &unlocked, &total))
@@ -3933,8 +4425,10 @@ static DWORD WINAPI WorkerThread(LPVOID)
         ++g_resolveCounter;
         if ((g_resolveCounter % 60) == 0)
             TryResolveStash();
-        // Hero locks every ~0.2s (12 x 16ms) so HP is refilled before a hero can die;
-        // god mode tightens that to ~33ms.
+        // Hero locks every ~0.2s (12 x 16ms) so HP is refilled before a hero can die; god mode
+        // tightens that to ~33ms. With the frame hook installed god mode also refills every
+        // frame (see HookedSimUpdate), which is what keeps a hero alive at 10x or 20x speed -
+        // this timer alone cannot, because it counts real time while the fight does not.
         if (g_oneHitKill && (g_resolveCounter % 6) == 0)
             ApplyOneHitKill();
         if (g_godMode && (g_resolveCounter % 2) == 0)
@@ -4000,6 +4494,21 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 RunHeroScan();
             else if (g_heroScan->command == 7)
                 RunHeroLayoutDump();
+            else if (g_heroScan->command == 37)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunChestLog(g_heroScan->value != 0.0f);
+            }
+            else if (g_heroScan->command == 34)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                if (g_heroScan->value == 2.0f) RunCeilingProbe();
+                else RunAccountUpgrades(g_heroScan->value != 0.0f);
+            }
             else if (g_heroScan->command == 31)
             {
                 g_heroScan->done = 0;
