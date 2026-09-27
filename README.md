@@ -8,6 +8,8 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp) โดย DE
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6, 1.2.7 และ **1.2.8** (build 25454993, profile `V128`: RVA ใหม่ layout เหมือน 1.2.7)
 **อัปเดตล่าสุด:** 2026-09-22 (เกมอัปเดตเป็น 1.2.6 build 25435119 ส่วน 1.2.5 ถูกทับในวันเดียวกัน)
 
+ถ้าเครื่องมือนี้มีประโยชน์ เลี้ยงกาแฟกันได้ที่ [ko-fi.com/kewiv](https://ko-fi.com/kewiv) ☕
+
 ---
 
 # 1. Build
@@ -479,3 +481,9 @@ prologue ที่ใช้:
 - **JamalGames** — dump ของเกมและ ACTk
 - **KusursuzHacker** — offset จากฟอรัมที่เคยเป็น Extra Features (ลบออกแล้ว)
 - **BabyGroot** — CE script ที่เคยเป็น High EXP (ลบออกแล้วใน v1.4.0)
+
+---
+
+# Support
+
+ถ้า trainer ตัวนี้ช่วยคุณได้ สนับสนุนกันได้ที่ **[ko-fi.com/kewiv](https://ko-fi.com/kewiv)** ☕
