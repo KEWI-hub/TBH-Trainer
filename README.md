@@ -107,6 +107,32 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
 
+## ข้อจำกัดที่รู้แล้ว: เร่งสปีดสูงแล้ว progress ค้าง
+
+เร่งสปีดเกิน ~10x แล้วด่านจะค้าง ฆ่ามอนต่อไปแต่ progress ไม่ขยับ **ไม่ใช่บั๊กของ trainer
+โดยตรง แต่ trainer เป็นตัวกระตุ้น และแก้ไม่ได้จากฝั่งเรา**
+
+เกมเขียน error ของตัวเองลง `Player.log` ทุกครั้งที่เกิด (เจอ 254 ครั้งในรอบเดียว):
+
+```
+[CoreTBH_DebugLog] : [System.Stage] StageCount Error [1.1.2:e39d4d3]
+  wh.wb.jza(Int32)
+  TaskbarHero.sp:MoveNext() / TaskbarHero.su:MoveNext()   <- coroutine
+  TaskbarHero.StageManager:irb(Int32, EMonsterType, EStageType, Int32, Single, Int32)
+  TaskbarHero.Manager.MonsterSpawnManager:lrg(...)
+  TaskbarHero.Monster:gwm(Unit)                            <- มอนตาย
+  TaskbarHero.Monster:gvu(DamageInfo, Boolean)             <- มอนโดนตี
+```
+
+มอนตาย → spawn manager แจ้ง StageManager ให้นับ → การนับวิ่งผ่าน **coroutine** →
+เกมฟ้อง `StageCount Error` แล้วไม่นับ
+
+Coroutine ของ Unity เดินเฟรมละก้าวไม่ว่า `timeScale` จะเป็นเท่าไหร่ พอเร่ง 20x มอนตาย
+ต่อเฟรมมากขึ้น 20 เท่าแต่ตัวนับเดินเท่าเดิม จึงตามไม่ทัน **One-hit kill ยิ่งเร่งอาการ**
+เพราะทำให้มอนตายพร้อมกันเป็นกอง
+
+**ทางเลี่ยง:** อยู่ที่ประมาณ 10x ซึ่งตัวนับยังตามทัน หรือปิด One-hit kill ตอนเร่งสูง
+
 ## เปลี่ยนแปลงใน v2.0.1
 
 - ปุ่ม **☕ Support on Ko-fi** มุมขวาบนของแบนเนอร์ กดแล้วเปิด [ko-fi.com/kewiv](https://ko-fi.com/kewiv) ในเบราว์เซอร์
