@@ -1,5 +1,6 @@
 #pragma warning disable CA1416
 
+using System.Diagnostics;
 using System.Text;
 
 namespace TBH_Trainer;
@@ -232,6 +233,29 @@ internal sealed class MainForm : Form
 
         _header = new Panel { Location = new Point(0, 0), Size = new Size(584, 76), BackColor = BgForm };
         _header.Paint += PaintHeader;
+
+        // Support link, top right of the banner. Opens in the default browser.
+        var lnkKofi = new LinkLabel
+        {
+            Text = "☕ Support on Ko-fi",
+            Location = new Point(424, 52), AutoSize = true,
+            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+            LinkColor = AccentCyan, ActiveLinkColor = AccentPurp, VisitedLinkColor = AccentCyan,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            BackColor = BgForm, Cursor = Cursors.Hand
+        };
+        lnkKofi.LinkClicked += (_, _) =>
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("https://ko-fi.com/kewiv") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                Log($"could not open the Ko-fi page: {ex.Message}");
+            }
+        };
+        _header.Controls.Add(lnkKofi);
         Controls.Add(_header);
 
         // === Tabs ===
