@@ -98,7 +98,7 @@ internal sealed class MainForm : Form
         InitializeTrayIcon();
         Shown += async (_, _) =>
         {
-            // Offer a newer release (invited users only) before the version warning.
+            // Offer a newer release before the version warning.
             await Updater.CheckAsync(this, Log, interactive: false);
             if (_startupDllPath != null)
                 WarnIfUnsupportedBuild(_startupDiskBuild, _startupDllPath);
