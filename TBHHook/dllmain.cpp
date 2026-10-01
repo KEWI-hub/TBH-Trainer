@@ -48,14 +48,15 @@ struct SharedState
     int32_t rvaSlotMove;   // 0x64  rz.ije(MoveRequest, Action<MoveResult>) -> player drag & drop
     int32_t rvaAccStatusGet; // 0x68  int  AccountStatus.llw(EAccountStatus)
     int32_t rvaAccStatusSet; // 0x6C  void AccountStatus.llx(EAccountStatus, int)
+    int32_t rvaMonsterDie;   // 0x70  bool Monster.gwm(Unit killer) -> the game's own death path
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 112, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 116, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 112;
+static const int      kMapSize = 116;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -2170,17 +2171,107 @@ static void ForEachUnitHealth(int32_t damageableType, Fn fn)
         if (!unit) continue;
         uint8_t* hp = reinterpret_cast<uint8_t*>(HealthControllerOf(unit));
         if (!hp) continue;
-        fn(hp);
+        fn(unit, hp);
     }
 }
 
+// One-hit kill leaves monsters at 1 HP and lets a hero land the blow, which keeps the game's
+// own death, drop and counting flow intact. At 10x-20x speed that leaves a hole: a monster the
+// heroes never reach sits at 1 HP forever, the wave waits for a death that cannot happen, and
+// progress stalls one kill short - the "it skipped a monster" stall.
+//
+// So monsters that have been sitting at 1 HP with nobody finishing them get finished here, by
+// calling the game's own Monster.gwm(killer). That is the same method a hero's killing blow
+// calls, so the spawn manager and the stage counter still see a normal death.
+static const int       kStuckSlots      = 96;
+static const ULONGLONG kStuckFastMs     = 500;    // while the game is sped up
+static const ULONGLONG kStuckNormalMs   = 2500;   // at normal speed
+
+// How long a monster may sit at 1 HP before it is finished here. The stall only happens when
+// the game is sped up, so at normal speed the wait stays long and heroes do the killing; once
+// the speedhack is on, half a second of real time is already ten seconds of game time, so
+// anything still alive is genuinely stuck rather than merely not reached yet.
+static ULONGLONG StuckThresholdMs()
+{
+    bool fast = g_shared && g_shared->speedEnabled && g_shared->timeScale > 1.5f;
+    return fast ? kStuckFastMs : kStuckNormalMs;
+}
+
+struct StuckMonster { void* unit; ULONGLONG since; };
+static StuckMonster g_stuck[kStuckSlots];
+static void*        g_monsterDie = nullptr;
+static volatile LONG g_stuckFinished = 0;
+
+static void FinishStuckMonster(void* monster)
+{
+    if (!g_monsterDie) return;
+    void* killer = ResolveHeroByIndex(0);
+    if (!killer) return;
+    void* args[1] = { killer };
+    void* exc = nullptr;
+    il2cpp_runtime_invoke(g_monsterDie, monster, args, &exc);
+    if (!exc) InterlockedIncrement(&g_stuckFinished);
+}
+
+// Worker thread: nothing here may call into the game, only write memory.
 static void ApplyOneHitKill()
 {
-    ForEachUnitHealth(2, [](uint8_t* hp)   // DamageableType.Monster
+    ForEachUnitHealth(2, [](void*, uint8_t* hp)   // DamageableType.Monster
     {
         float& current = *reinterpret_cast<float*>(hp + 0x40);
         if (current > 1.0f) current = 1.0f;
     });
+}
+
+// Main thread only (frame hook). Monster.gwm is a managed call, and calling the game from the
+// worker thread crashes Unity, which is exactly what the first attempt at this did.
+static void StuckMonsterTick()
+{
+    static ULONGLONG nextSweep = 0;
+    ULONGLONG now = GetTickCount64();
+    if (now < nextSweep) return;
+    nextSweep = now + 250;   // half the threshold, so the wait is not rounded up much
+
+    if (!g_monsterDie && g_shared && g_shared->rvaMonsterDie > 0)
+        g_monsterDie = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaMonsterDie), 1, nullptr);
+    if (!g_monsterDie) return;
+
+    static void* seen[kStuckSlots];
+    int seenCount = 0;
+    void* finish = nullptr;
+
+    ForEachUnitHealth(2, [&](void* unit, uint8_t* hp)
+    {
+        float current = *reinterpret_cast<float*>(hp + 0x40);
+        if (current <= 0.0f) return;
+        if (seenCount < kStuckSlots) seen[seenCount++] = unit;
+
+        int free = -1;
+        for (int i = 0; i < kStuckSlots; ++i)
+        {
+            if (g_stuck[i].unit == unit)
+            {
+                if (!finish && now - g_stuck[i].since >= StuckThresholdMs())
+                {
+                    finish = unit;          // one per sweep, so a bad call cannot cascade
+                    g_stuck[i].since = now;
+                }
+                return;
+            }
+            if (!g_stuck[i].unit && free < 0) free = i;
+        }
+        if (free >= 0) { g_stuck[free].unit = unit; g_stuck[free].since = now; }
+    });
+
+    for (int i = 0; i < kStuckSlots; ++i)
+    {
+        if (!g_stuck[i].unit) continue;
+        bool alive = false;
+        for (int k = 0; k < seenCount; ++k) if (seen[k] == g_stuck[i].unit) { alive = true; break; }
+        if (!alive) g_stuck[i].unit = nullptr;
+    }
+
+    if (finish) FinishStuckMonster(finish);
 }
 
 // God mode: refill every hero in the stage, not only the three UI slots (some modes,
@@ -2188,7 +2279,7 @@ static void ApplyOneHitKill()
 static const float kGodModeHp = 2.0e9f;   // just under int.MaxValue (the game may cast HP to int)
 static void ApplyGodModeAllHeroes()
 {
-    ForEachUnitHealth(1, [](uint8_t* hp)   // DamageableType.Hero
+    ForEachUnitHealth(1, [](void*, uint8_t* hp)   // DamageableType.Hero
     {
         float& current = *reinterpret_cast<float*>(hp + 0x40);
         float& maxHp = *reinterpret_cast<float*>(hp + 0x4C);
@@ -3113,6 +3204,7 @@ static void HookedSimUpdate(void* self, const void* method)
         ApplyGodModeAllHeroes();
         for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
     }
+    if (g_oneHitKill && !g_shuttingDown && !paused) StuckMonsterTick();
     if (!g_shuttingDown && !paused) ChestLogTick();
     if (g_autoOpenBoxes && !g_shuttingDown && !paused) BoxJobTick();
     if (g_autoBagMove && !g_shuttingDown && !paused) BagMoveTick();
@@ -3615,8 +3707,8 @@ static void RunSelfCheck()
     }
     pos = ScanAppend(text, cap, pos, "heroes spawned: %d of 3\r\n", spawned);
 
-    pos = ScanAppend(text, cap, pos, "god mode: %s | one-hit kill: %s\r\n",
-        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off");
+    pos = ScanAppend(text, cap, pos, "god mode: %s | one-hit kill: %s | stuck monsters finished: %ld\r\n",
+        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off", g_stuckFinished);
 
     bool boxApi = ResolveBoxApi();
     pos = ScanAppend(text, cap, pos, "auto open boxes: %s | box API: %s%s%s | opened so far: %ld\r\n",
