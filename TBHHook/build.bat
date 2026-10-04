@@ -38,5 +38,12 @@ if errorlevel 1 (
 :done
 if not exist "..\TrainerBuild" mkdir "..\TrainerBuild"
 copy /Y TBHHook.dll "..\TrainerBuild\TBHHook.dll" >nul
+rem The game keeps TBHHook.dll loaded and locked after injection, so this copy can fail while
+rem it is running. Saying BUILD OK anyway means testing the previous dll without noticing.
+if errorlevel 1 (
+    echo COPY FAILED - "..\TrainerBuild\TBHHook.dll" is locked. Close Taskbar Hero and the
+    echo trainer, then build again. The new dll is TBHHook\TBHHook.dll but it was NOT copied.
+    exit /b 1
+)
 echo BUILD OK - TBHHook.dll copied to TrainerBuild
 endlocal

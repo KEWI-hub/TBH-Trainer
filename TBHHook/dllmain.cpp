@@ -2184,13 +2184,19 @@ static void ForEachUnitHealth(int32_t damageableType, Fn fn)
 // calling the game's own Monster.gwm(killer). That is the same method a hero's killing blow
 // calls, so the spawn manager and the stage counter still see a normal death.
 static const int       kStuckSlots      = 96;
-static const ULONGLONG kStuckFastMs     = 500;    // while the game is sped up
-static const ULONGLONG kStuckNormalMs   = 2500;   // at normal speed
+static const ULONGLONG kStuckFastMs     = 100;    // while the game is sped up: one spawn's grace
+static const ULONGLONG kStuckNormalMs   = 2500;   // at normal speed: let the heroes do it
+static const int       kStuckPerSweep   = 8;      // finished per sweep, so a wave cannot queue up
 
-// How long a monster may sit at 1 HP before it is finished here. The stall only happens when
-// the game is sped up, so at normal speed the wait stays long and heroes do the killing; once
-// the speedhack is on, half a second of real time is already ten seconds of game time, so
-// anything still alive is genuinely stuck rather than merely not reached yet.
+// How long a monster may sit at 1 HP before it is finished here. At normal speed the wait stays
+// long and heroes do the killing, because nothing stalls at 1x and taking kills from the heroes
+// there would only change the game for no reason.
+//
+// With the speedhack on, waiting is pointless: a monster at 1 HP dies to the first hero that
+// reaches it, so one that is still alive is one the heroes are not going to reach. The wait is
+// down to 100 ms, which is all it is for now - not patience, just enough frames for a monster
+// that spawned this instant to be registered with the wave before it is killed. At 20x that is
+// two seconds of game time, and on screen it looks immediate.
 static ULONGLONG StuckThresholdMs()
 {
     bool fast = g_shared && g_shared->speedEnabled && g_shared->timeScale > 1.5f;
@@ -2227,10 +2233,9 @@ static void ApplyOneHitKill()
 // worker thread crashes Unity, which is exactly what the first attempt at this did.
 static void StuckMonsterTick()
 {
-    static ULONGLONG nextSweep = 0;
+    // Sweeping every frame costs one walk of 96 unit slots; the wait above is the only delay,
+    // so it is not rounded up by a sweep interval on top.
     ULONGLONG now = GetTickCount64();
-    if (now < nextSweep) return;
-    nextSweep = now + 250;   // half the threshold, so the wait is not rounded up much
 
     if (!g_monsterDie && g_shared && g_shared->rvaMonsterDie > 0)
         g_monsterDie = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaMonsterDie), 1, nullptr);
@@ -2238,7 +2243,8 @@ static void StuckMonsterTick()
 
     static void* seen[kStuckSlots];
     int seenCount = 0;
-    void* finish = nullptr;
+    void* finish[kStuckPerSweep];
+    int finishCount = 0;
 
     ForEachUnitHealth(2, [&](void* unit, uint8_t* hp)
     {
@@ -2251,10 +2257,10 @@ static void StuckMonsterTick()
         {
             if (g_stuck[i].unit == unit)
             {
-                if (!finish && now - g_stuck[i].since >= StuckThresholdMs())
+                if (finishCount < kStuckPerSweep && now - g_stuck[i].since >= StuckThresholdMs())
                 {
-                    finish = unit;          // one per sweep, so a bad call cannot cascade
-                    g_stuck[i].since = now;
+                    finish[finishCount++] = unit;
+                    g_stuck[i].since = now;   // do not hammer it if the call did nothing
                 }
                 return;
             }
@@ -2271,7 +2277,7 @@ static void StuckMonsterTick()
         if (!alive) g_stuck[i].unit = nullptr;
     }
 
-    if (finish) FinishStuckMonster(finish);
+    for (int i = 0; i < finishCount; ++i) FinishStuckMonster(finish[i]);
 }
 
 // God mode: refill every hero in the stage, not only the three UI slots (some modes,
