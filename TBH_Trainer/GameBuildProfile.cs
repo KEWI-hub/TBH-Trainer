@@ -62,6 +62,9 @@ internal sealed class GameBuildProfile
 
     /// <summary>bool Monster.gwm(Unit killer) - the game's own monster death path.</summary>
     public int MonsterDieRva { get; init; }
+    /// <summary>pl.gxf(float damage, Unit attacker) - the health controller's damage entry,
+    /// which runs the game's whole kill path including the loot roll.</summary>
+    public int MonsterDamageRva { get; init; }
 
     /// <summary>int AccountStatus.llw(EAccountStatus) - reads one account upgrade value.</summary>
     public int AccStatusGetRva { get; init; }
@@ -282,6 +285,7 @@ internal sealed class GameBuildProfile
         StashCacheRva = 0x9C3A40,   // wh.Stash.kcd
         BoxCountRva   = 0x96D650,   // wh.uy.jig(EBoxType, EContentType) -> box count
         MonsterDieRva = 0xD079C0,   // Monster.gwm(Unit) -> finishes a monster the normal way
+        MonsterDamageRva = 0xD10D00, // pl.gxf(float, Unit) -> damages it as a hero would
         SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
         AccStatusGetRva = 0xA8F440, // AccountStatus.llw(EAccountStatus) -> int
         AccStatusSetRva = 0xA8F4D0, // AccountStatus.llx(EAccountStatus, int)

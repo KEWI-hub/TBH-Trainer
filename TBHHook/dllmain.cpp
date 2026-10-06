@@ -49,14 +49,15 @@ struct SharedState
     int32_t rvaAccStatusGet; // 0x68  int  AccountStatus.llw(EAccountStatus)
     int32_t rvaAccStatusSet; // 0x6C  void AccountStatus.llx(EAccountStatus, int)
     int32_t rvaMonsterDie;   // 0x70  bool Monster.gwm(Unit killer) -> the game's own death path
+    int32_t rvaMonsterDamage;// 0x74  void pl.gxf(float damage, Unit attacker) -> the hero's own damage path
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 116, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 120, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 116;
+static const int      kMapSize = 120;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -261,8 +262,8 @@ struct HeroLocks
     float maxHpValue;
     float attackDamageValue;
     float attackSpeedValue;
-    bool  extra[12];       // one per entry in kExtraStats
-    float extraValue[12];
+    bool  extra[24];       // one per entry in kExtraStats
+    float extraValue[24];
 };
 static HeroLocks g_heroLocks[3] = {};
 
@@ -274,7 +275,8 @@ static volatile bool      g_shuttingDown   = false;
 // runs when a stat changes, so every offset below is the field the game writes for that
 // StatType. Most are ObscuredFloat; Skill Range is a plain float and Projectile Count /
 // Multistrike are plain ints (Multistrike is stored twice, +0x27C then mirrored to +0x278).
-enum StatKind : uint8_t { kStatObscured = 0, kStatFloat = 1, kStatInt = 2, kStatObscuredInt = 3 };
+enum StatKind : uint8_t { kStatObscured = 0, kStatFloat = 1, kStatInt = 2, kStatObscuredInt = 3,
+                          kStatResist = 4 };   // offset holds an EDamageAttribute, not a field offset
 
 struct ExtraStat
 {
@@ -294,10 +296,31 @@ static const ExtraStat kExtraStats[] =
     { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f },  // under the 1e7 sanity limit
     { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f },       // live heroes reach ~30
     { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f },       // live heroes reach ~2.4
-    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 8.0f },        // live heroes reach ~5.8
-    { 0x274, 0,     "Skill Range",        kStatFloat,    3.0f },
+    // Reach is what decides whether a hero ever touches a monster, and only a hero's kill drops
+    // anything - measured over three builds of trying to kill them ourselves. So these two are
+    // deliberately far past what a live hero reaches: heroes that cover the arena leave nothing
+    // stranded, and nothing stranded means nothing for the hook to finish off and spoil.
+    // Reach is what stops monsters being stranded at high speed, but 30 fills the screen with
+    // skill effects, and below ~5x nothing gets stranded anyway. The button stays at a value
+    // that is playable; the Hero Stats tab can write any number on top of it.
+    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 10.0f },
+    { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f },
     { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
     { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
+    { 0x1A4, 0,     "Damage Reduction",   kStatObscured, 1.0f },        // live heroes sit at ~0
+    // These four are dictionary keys (EDamageAttribute), not field offsets.
+    { 1,     0,     "Fire Resistance",      kStatResist, 1.0f },
+    { 2,     0,     "Cold Resistance",      kStatResist, 1.0f },
+    { 3,     0,     "Lightning Resistance", kStatResist, 1.0f },
+    { 4,     0,     "Chaos Resistance",     kStatResist, 1.0f },
+    { 0x1B8, 0,     "Damage Absorption",  kStatObscured,    1.0f },
+    { 0x1CC, 0,     "Dodge Chance",       kStatObscured,    1.0f },        // = 100%
+    { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f },        // = 100%
+    { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f },        // = 100%
+    { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f },
+    // Exp is left alone on purpose - the user does not want levelling touched.
+    // BaseAttackCountReduction (+0x204) is deliberately left out: it is a count the attack
+    // routine counts down, not a bonus, and winding it up breaks attacks instead of helping.
 };
 static const int kExtraStatCount = static_cast<int>(sizeof(kExtraStats) / sizeof(kExtraStats[0]));
 
@@ -2184,8 +2207,13 @@ static void ForEachUnitHealth(int32_t damageableType, Fn fn)
 // calling the game's own Monster.gwm(killer). That is the same method a hero's killing blow
 // calls, so the spawn manager and the stage counter still see a normal death.
 static const int       kStuckSlots      = 96;
-static const ULONGLONG kStuckFastMs     = 100;    // while the game is sped up: one spawn's grace
-static const ULONGLONG kStuckNormalMs   = 2500;   // at normal speed: let the heroes do it
+// Measured across four builds: a kill the hook makes drops nothing, and chests always came out
+// at exactly what the hero kills alone predicted. So the hook now stays out of the way - 30
+// seconds of real time is ten minutes of game time at 20x, long enough that anything still
+// standing is genuinely stuck rather than merely not reached yet. The finisher is a safety net
+// again, not the thing doing the killing.
+static const ULONGLONG kStuckFastMs     = 1000;
+static const ULONGLONG kStuckNormalMs   = 1000;
 static const int       kStuckPerSweep   = 8;      // finished per sweep, so a wave cannot queue up
 
 // How long a monster may sit at 1 HP before it is finished here. At normal speed the wait stays
@@ -2203,20 +2231,119 @@ static ULONGLONG StuckThresholdMs()
     return fast ? kStuckFastMs : kStuckNormalMs;
 }
 
-struct StuckMonster { void* unit; ULONGLONG since; };
-static StuckMonster g_stuck[kStuckSlots];
-static void*        g_monsterDie = nullptr;
-static volatile LONG g_stuckFinished = 0;
+static const ULONGLONG kStuckRetryMs  = 250;  // between moves, and before the backstop
+static const int       kStuckMaxMoves = 3;    // then stop being patient and kill it
 
-static void FinishStuckMonster(void* monster)
+// UnityEngine, resolved by name so a game update that moves everything does not break this.
+static void* g_getTransform = nullptr;   // Component.get_transform()
+static void* g_getPosition  = nullptr;   // Transform.get_position()
+static void* g_setPosition  = nullptr;   // Transform.set_position(Vector3)
+
+struct Vec3 { float x, y, z; };
+
+static void ResolveUnityTransformApi()
 {
-    if (!g_monsterDie) return;
+    if (g_setPosition || !g_domain) return;
+    void* component = FindClass(g_domain, "UnityEngine", "Component");
+    void* transform = FindClass(g_domain, "UnityEngine", "Transform");
+    if (!component || !transform) return;
+    g_getTransform = il2cpp_class_get_method_from_name(component, "get_transform", 0);
+    g_getPosition  = il2cpp_class_get_method_from_name(transform, "get_position", 0);
+    g_setPosition  = il2cpp_class_get_method_from_name(transform, "set_position", 1);
+}
+
+static void* TransformOf(void* component)
+{
+    if (!g_getTransform || !component) return nullptr;
+    void* exc = nullptr;
+    void* tr = il2cpp_runtime_invoke(g_getTransform, component, nullptr, &exc);
+    return exc ? nullptr : tr;
+}
+
+static bool WorldPositionOf(void* component, Vec3* out)
+{
+    void* tr = TransformOf(component);
+    if (!tr || !g_getPosition) return false;
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(g_getPosition, tr, nullptr, &exc);
+    if (exc || !boxed) return false;
+    *out = *reinterpret_cast<Vec3*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+    return true;
+}
+
+static bool MoveTo(void* component, const Vec3& where)
+{
+    void* tr = TransformOf(component);
+    if (!tr || !g_setPosition) return false;
+    Vec3 p = where;
+    void* args[1] = { &p };
+    void* exc = nullptr;
+    il2cpp_runtime_invoke(g_setPosition, tr, args, &exc);
+    return exc == nullptr;
+}
+
+struct StuckMonster { void* unit; ULONGLONG since; int tries; };
+static StuckMonster g_stuck[kStuckSlots];
+static void*        g_monsterDie = nullptr;    // Monster.gwm(Unit)   - death call, drops nothing
+static void*        g_monsterDamage = nullptr; // pl.gxf(float, Unit) - damage, the hero's path
+
+// Counted when a monster leaves the unit list, by what we had done to it by then - so these say
+// what killed it, not what returned without an error.
+static volatile LONG g_killedByHero   = 0;   // a hero did it, loot and all
+static volatile LONG g_killedByDamage = 0;   // our damage call did it
+static volatile LONG g_killedByDie    = 0;   // the death call did it
+static volatile LONG g_monstersMoved  = 0;   // carried to a hero so a hero could do it
+
+// First try: hit it for more than it has left, in a hero's name, through the same health
+// controller entry a real attack uses, so the game runs its whole kill path including the drop
+// roll. If it is still standing on a later sweep, stop being clever and call the death method -
+// that one always works and only costs the drop. Neither call reports whether the monster died,
+// so the caller decides which one to use from how many tries this monster has already had.
+// Put the monster where the heroes are, so a hero kills it the ordinary way - the only kill
+// measured to actually drop anything.
+static bool CarryToHero(void* monster)
+{
+    ResolveUnityTransformApi();
+    if (!g_setPosition) return false;
+
+    void* hero = nullptr;
+    for (int32_t i = 0; i < 3 && !hero; ++i) hero = ResolveHeroByIndex(i);
+    if (!hero) return false;
+
+    Vec3 at;
+    if (!WorldPositionOf(hero, &at)) return false;
+    if (!MoveTo(monster, at)) return false;
+
+    InterlockedIncrement(&g_monstersMoved);
+    return true;
+}
+
+static void FinishStuckMonster(void* monster, int tries)
+{
+    // First attempts hand it to a hero. Only one still standing after that gets killed
+    // outright, which costs its drop but keeps the stage moving.
+    if (tries < kStuckMaxMoves && CarryToHero(monster)) return;
+
     void* killer = ResolveHeroByIndex(0);
     if (!killer) return;
+
+    if (tries == kStuckMaxMoves && g_monsterDamage)
+    {
+        void* health = HealthControllerOf(monster);
+        if (health)
+        {
+            float damage = 1.0e9f;
+            void* args[2] = { &damage, killer };
+            void* exc = nullptr;
+            il2cpp_runtime_invoke(g_monsterDamage, health, args, &exc);
+            return;
+        }
+    }
+
+    if (!g_monsterDie) return;
     void* args[1] = { killer };
     void* exc = nullptr;
     il2cpp_runtime_invoke(g_monsterDie, monster, args, &exc);
-    if (!exc) InterlockedIncrement(&g_stuckFinished);
 }
 
 // Worker thread: nothing here may call into the game, only write memory.
@@ -2239,11 +2366,13 @@ static void StuckMonsterTick()
 
     if (!g_monsterDie && g_shared && g_shared->rvaMonsterDie > 0)
         g_monsterDie = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaMonsterDie), 1, nullptr);
-    if (!g_monsterDie) return;
+    if (!g_monsterDamage && g_shared && g_shared->rvaMonsterDamage > 0)
+        g_monsterDamage = FindMethodByRva(static_cast<uintptr_t>(g_shared->rvaMonsterDamage), 2, nullptr);
+    if (!g_monsterDie && !g_monsterDamage) return;
 
     static void* seen[kStuckSlots];
     int seenCount = 0;
-    void* finish[kStuckPerSweep];
+    struct { void* unit; int tries; } finish[kStuckPerSweep];
     int finishCount = 0;
 
     ForEachUnitHealth(2, [&](void* unit, uint8_t* hp)
@@ -2257,27 +2386,36 @@ static void StuckMonsterTick()
         {
             if (g_stuck[i].unit == unit)
             {
-                if (finishCount < kStuckPerSweep && now - g_stuck[i].since >= StuckThresholdMs())
+                ULONGLONG wait = g_stuck[i].tries ? kStuckRetryMs : StuckThresholdMs();
+                if (finishCount < kStuckPerSweep && now - g_stuck[i].since >= wait)
                 {
-                    finish[finishCount++] = unit;
+                    finish[finishCount].unit  = unit;
+                    finish[finishCount].tries = g_stuck[i].tries;
+                    ++finishCount;
                     g_stuck[i].since = now;   // do not hammer it if the call did nothing
+                    ++g_stuck[i].tries;
                 }
                 return;
             }
             if (!g_stuck[i].unit && free < 0) free = i;
         }
-        if (free >= 0) { g_stuck[free].unit = unit; g_stuck[free].since = now; }
+        if (free >= 0) { g_stuck[free].unit = unit; g_stuck[free].since = now; g_stuck[free].tries = 0; }
     });
 
+    // A monster that has left the list is dead; what we had done to it by then says what did it.
     for (int i = 0; i < kStuckSlots; ++i)
     {
         if (!g_stuck[i].unit) continue;
         bool alive = false;
         for (int k = 0; k < seenCount; ++k) if (seen[k] == g_stuck[i].unit) { alive = true; break; }
-        if (!alive) g_stuck[i].unit = nullptr;
+        if (alive) continue;
+        if      (g_stuck[i].tries == 0) InterlockedIncrement(&g_killedByHero);
+        else if (g_stuck[i].tries == 1) InterlockedIncrement(&g_killedByDamage);
+        else                            InterlockedIncrement(&g_killedByDie);
+        g_stuck[i].unit = nullptr;
     }
 
-    for (int i = 0; i < finishCount; ++i) FinishStuckMonster(finish[i]);
+    for (int i = 0; i < finishCount; ++i) FinishStuckMonster(finish[i].unit, finish[i].tries);
 }
 
 // God mode: refill every hero in the stage, not only the three UI slots (some modes,
@@ -2296,9 +2434,52 @@ static void ApplyGodModeAllHeroes()
 }
 
 // Writes one stat, whichever way the game stores it.
+// Elemental resistances are not fields. The unit keeps them in
+// Dictionary<EDamageAttribute, float> at +0x260, so they are read and written through the
+// dictionary's own methods - poking memory there would corrupt its buckets.
+static void* ResistDict(void* unit)
+{
+    if (!unit) return nullptr;
+    return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(unit) + 0x260);
+}
+
+static bool WriteResist(void* unit, int32_t attribute, float value)
+{
+    void* dict = ResistDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
+    void* klass = il2cpp_object_get_class(dict);
+    void* setItem = klass ? il2cpp_class_get_method_from_name(klass, "set_Item", 2) : nullptr;
+    if (!setItem) return false;
+
+    int32_t key = attribute;
+    float   val = value;
+    void*   args[2] = { &key, &val };
+    void*   exc = nullptr;
+    il2cpp_runtime_invoke(setItem, dict, args, &exc);
+    return exc == nullptr;
+}
+
+static float ReadResist(void* unit, int32_t attribute)
+{
+    void* dict = ResistDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return 0.0f;
+    void* klass = il2cpp_object_get_class(dict);
+    void* getItem = klass ? il2cpp_class_get_method_from_name(klass, "get_Item", 1) : nullptr;
+    if (!getItem) return 0.0f;
+
+    int32_t key = attribute;
+    void*   args[1] = { &key };
+    void*   exc = nullptr;
+    void*   boxed = il2cpp_runtime_invoke(getItem, dict, args, &exc);
+    if (exc || !boxed) return 0.0f;   // the key is simply not in the dictionary yet
+    return *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+}
+
 static bool WriteExtraStat(void* hero, const ExtraStat& stat, float value)
 {
     if (!hero) return false;
+    if (stat.kind == kStatResist)
+        return WriteResist(hero, static_cast<int32_t>(stat.offset), value);
     uint8_t* field = reinterpret_cast<uint8_t*>(hero) + stat.offset;
     switch (stat.kind)
     {
@@ -2347,6 +2528,7 @@ static float ReadExtraStat(void* hero, const ExtraStat& stat)
         }
         case kStatFloat:    return *reinterpret_cast<float*>(field);
         case kStatInt:      return static_cast<float>(*reinterpret_cast<int32_t*>(field));
+        case kStatResist:   return ReadResist(hero, static_cast<int32_t>(stat.offset));
     }
     return 0.0f;
 }
@@ -3713,8 +3895,11 @@ static void RunSelfCheck()
     }
     pos = ScanAppend(text, cap, pos, "heroes spawned: %d of 3\r\n", spawned);
 
-    pos = ScanAppend(text, cap, pos, "god mode: %s | one-hit kill: %s | stuck monsters finished: %ld\r\n",
-        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off", g_stuckFinished);
+    pos = ScanAppend(text, cap, pos, "god mode: %s | one-hit kill: %s\r\n",
+        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off");
+    pos = ScanAppend(text, cap, pos, "monsters killed: %ld by a hero, %ld by our damage, %ld by the death call\r\n",
+        g_killedByHero, g_killedByDamage, g_killedByDie);
+    pos = ScanAppend(text, cap, pos, "stranded monsters carried to a hero: %ld\r\n", g_monstersMoved);
 
     bool boxApi = ResolveBoxApi();
     pos = ScanAppend(text, cap, pos, "auto open boxes: %s | box API: %s%s%s | opened so far: %ld\r\n",
@@ -4142,6 +4327,12 @@ static void RunHeroScan()
         { 0x27C, 0x278, "Multistrike",              kStatInt,      0 },
         { 0x29C, 0,     "BlockChance",              kStatFloat,    0 },
         { 0x2A0, 0,     "ElementalBlockChance",     kStatFloat,    0 },
+        // Dictionary<EDamageAttribute, float> at +0x260, so these four read through the
+        // dictionary - printed here to compare what we write against what the game shows.
+        { 1,     0,     "FireResistance",           kStatResist,   0 },
+        { 2,     0,     "ColdResistance",           kStatResist,   0 },
+        { 3,     0,     "LightningResistance",      kStatResist,   0 },
+        { 4,     0,     "ChaosResistance",          kStatResist,   0 },
     };
 
     for (int32_t i = 0; i < count; ++i)

@@ -10,6 +10,16 @@
     <AssemblyName>TBH Trainer</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>icon.ico</ApplicationIcon>
+    <!-- Footprint: the trainer idles next to the game, so it should not keep a background GC
+         thread alive or carry EventSource plumbing nothing reads.
+         InvariantGlobalization is deliberately NOT set. It looks free because this code only
+         uses InvariantCulture, but WinForms builds a CultureInfo from the keyboard layout on
+         every WM_INPUTLANGCHANGE, so switching to a Thai (or any non-English) keyboard threw
+         CultureNotFoundException inside WndProc and killed the trainer. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="logo.png" />

@@ -1,6 +1,7 @@
 #pragma warning disable CA1416
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace TBH_Trainer;
@@ -102,6 +103,11 @@ internal sealed class MainForm : Form
             await Updater.CheckAsync(this, Log, interactive: false);
             if (_startupDllPath != null)
                 WarnIfUnsupportedBuild(_startupDiskBuild, _startupDllPath);
+
+            // Startup allocates far more than the trainer needs to sit idle; give it back once.
+            var settle = new System.Windows.Forms.Timer { Interval = 60_000 };
+            settle.Tick += (_, _) => { settle.Stop(); settle.Dispose(); TrimMemory(); };
+            settle.Start();
         };
     }
 
@@ -134,6 +140,7 @@ internal sealed class MainForm : Form
             Hide();
             ShowInTaskbar = false;
             _trayIcon.Visible = true;
+            TrimMemory();
         };
     }
 
@@ -282,6 +289,7 @@ internal sealed class MainForm : Form
         {
             Location = new Point(12, 20), Size = new Size(540, 118),
             Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true,
+            MaxLength = 0,   // default is 32767 chars, after which a TextBox silently drops new text
             BackColor = Color.FromArgb(12, 13, 18), ForeColor = Color.FromArgb(120, 220, 200),
             Font = new Font("Consolas", 8.5f), BorderStyle = BorderStyle.FixedSingle
         };
@@ -523,7 +531,9 @@ internal sealed class MainForm : Form
         _btnSelfCheck.Click += (_, _) => OnSelfCheck();
         Label lblMax = new()
         {
-            Text = "Atk Dmg/Spd, Crit, CDR, Armor, Move, Cast, AoE, Skill Range, Projectiles, Multistrike",
+            Text = "Atk Dmg/Spd, Crit, CDR, Armor, Move, Cast, AoE, Skill Range, Projectiles, Multistrike,"
+                   + Environment.NewLine
+                   + "Damage Reduction, Fire / Cold / Lightning / Chaos Resistance",
             Location = new Point(14, 140), AutoSize = true, ForeColor = TextDim,
             Font = new Font("Segoe UI", 8f)
         };
@@ -627,13 +637,56 @@ internal sealed class MainForm : Form
         g.DrawLine(pen, 0, rect.Height - 2, rect.Width, rect.Height - 2);
     }
 
+    // The log used to grow for the whole session - a trainer left open overnight ends up with
+    // a TextBox holding megabytes of text that it still has to lay out and scroll. The oldest
+    // half is dropped once it gets long. (MaxLength is set to 0 as well, but only for good
+    // measure: AppendText is not subject to it, so the old log was never actually truncated.)
+    private const int LogTrimAt = 24000;
+
     private void Log(string msg)
     {
         if (_txtLog == null) return;
         string line = $"[{DateTime.Now:HH:mm:ss}] {msg}\r\n";
-        if (_txtLog.InvokeRequired) _txtLog.Invoke(() => _txtLog.AppendText(line));
-        else _txtLog.AppendText(line);
+        if (_txtLog.InvokeRequired) _txtLog.Invoke(() => AppendLog(line));
+        else AppendLog(line);
     }
+
+    private void AppendLog(string line)
+    {
+        if (_txtLog.TextLength + line.Length > LogTrimAt)
+        {
+            string text = _txtLog.Text;
+            int cut = text.IndexOf('\n', text.Length / 2);
+            _txtLog.Text = cut >= 0 ? text[(cut + 1)..] : string.Empty;
+        }
+        _txtLog.AppendText(line);
+    }
+
+    /// <summary>
+    /// Hands the working set back to Windows. The pages are still ours and come back on the
+    /// next touch - this only stops an idle trainer sitting on ~100 MB of resident memory
+    /// while the game and everything else fight over what is left.
+    /// </summary>
+    private static void TrimMemory()
+    {
+        // Off the UI thread, and without WaitForPendingFinalizers. Both callers (the tray
+        // minimize handler and the startup timer) run on the UI thread, and a finalizer that
+        // needs to marshal back to that thread would then deadlock it - a WinForms hang, not a
+        // crash, which is what the first version risked. Neither GC.Collect nor EmptyWorkingSet
+        // needs the UI thread, so none of this belongs there.
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                GC.Collect();
+                EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+            }
+            catch { }
+        });
+    }
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
 
     private void OnAttach(object? sender, EventArgs e)
     {

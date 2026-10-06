@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal static class AppInfo
 {
     /// <summary>Bump together with the GitHub release tag (v&lt;Version&gt;).</summary>
-    public const string Version = "2.0.4";
+    public const string Version = "2.1.0";
 }
 
 /// <summary>
@@ -63,7 +63,7 @@ internal static class Updater
         }
 
         log($"Update available: {latest.Tag} (current v{AppInfo.Version}).");
-        string notes = latest.Notes.Length > 600 ? latest.Notes[..600] + " …" : latest.Notes;
+        string notes = latest.Notes.Length > 600 ? latest.Notes[..600] + " â€¦" : latest.Notes;
         if (MessageBox.Show(owner,
                 $"TBH Trainer {latest.Tag} is available (you have v{AppInfo.Version}).\n\n{notes}\n\nDownload and install now?",
                 "Update available", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
@@ -72,7 +72,7 @@ internal static class Updater
         // TBHHook.dll stays loaded (and locked) inside the game after injection.
         if (Process.GetProcessesByName("TaskBarHero").Length > 0)
         {
-            MessageBox.Show(owner, "Close Taskbar Hero first — TBHHook.dll is locked while the game is running.\n" +
+            MessageBox.Show(owner, "Close Taskbar Hero first â€” TBHHook.dll is locked while the game is running.\n" +
                                    "Then reopen the trainer to install the update.",
                 "Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -80,9 +80,9 @@ internal static class Updater
 
         try
         {
-            log($"Downloading {latest.AssetName}…");
+            log($"Downloading {latest.AssetName}â€¦");
             string staging = await DownloadAndExtractAsync(latest);
-            log("Installing update — the trainer will restart.");
+            log("Installing update â€” the trainer will restart.");
             LaunchInstaller(staging);
             Application.Exit();
         }
