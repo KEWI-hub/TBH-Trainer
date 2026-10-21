@@ -114,10 +114,31 @@ internal sealed class MainForm : Form
     // Minimize hides the window to the notification area instead of the taskbar.
     private NotifyIcon _trayIcon = null!;
 
+    /// <summary>
+    /// Keeps the trainer out of Alt+Tab (and off the taskbar - Windows ties the two together;
+    /// a window cannot have a taskbar button without also appearing in the switcher). The tray
+    /// icon is always visible to make up for it.
+    ///
+    /// An invisible owner window does the same job and keeps the normal caption, but it made
+    /// the form come up minimised and hidden, so this takes the plain route instead: Windows
+    /// draws a tool window with a shorter title bar and no icon in it.
+    /// </summary>
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TOOLWINDOW = 0x00000080;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+
     private void InitializeTrayIcon()
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show trainer", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("Hide to tray", null, (_, _) => HideToTray());
         menu.Items.Add("Check for updates", null, async (_, _) =>
         {
             RestoreFromTray();
@@ -130,27 +151,29 @@ internal sealed class MainForm : Form
             Icon = Icon ?? SystemIcons.Application,
             Text = "TBH Trainer",
             ContextMenuStrip = menu,
-            Visible = false,
+            Visible = true,   // the window has no taskbar button now, so this is the way back
         };
         _trayIcon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) RestoreFromTray(); };
 
         Resize += (_, _) =>
         {
             if (WindowState != FormWindowState.Minimized) return;
-            Hide();
-            ShowInTaskbar = false;
-            _trayIcon.Visible = true;
-            TrimMemory();
+            HideToTray();
         };
+    }
+
+    /// <summary>Out of sight, still running. The tray icon is how it comes back.</summary>
+    private void HideToTray()
+    {
+        Hide();
+        TrimMemory();
     }
 
     private void RestoreFromTray()
     {
-        ShowInTaskbar = true;
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
-        _trayIcon.Visible = false;
     }
 
     // Installed-build detection at startup, shown as a pop-up once the window is visible.
@@ -263,6 +286,19 @@ internal sealed class MainForm : Form
             }
         };
         _header.Controls.Add(lnkKofi);
+
+        // A tool window gets no minimize button from Windows (that is the price of staying out
+        // of Alt+Tab), so hiding to the tray needs a control of its own.
+        var btnHide = new Button
+        {
+            Text = "Hide to tray",
+            Location = new Point(448, 10), Size = new Size(120, 26),
+            FlatStyle = FlatStyle.Flat, BackColor = BtnBg, ForeColor = TextMain,
+            Font = new Font("Segoe UI", 8.5f), Cursor = Cursors.Hand
+        };
+        btnHide.FlatAppearance.BorderColor = AccentDim;
+        btnHide.Click += (_, _) => HideToTray();
+        _header.Controls.Add(btnHide);
         Controls.Add(_header);
 
         // === Tabs ===
