@@ -50,14 +50,15 @@ struct SharedState
     int32_t rvaAccStatusSet; // 0x6C  void AccountStatus.llx(EAccountStatus, int)
     int32_t rvaMonsterDie;   // 0x70  bool Monster.gwm(Unit killer) -> the game's own death path
     int32_t rvaMonsterDamage;// 0x74  void pl.gxf(float damage, Unit attacker) -> the hero's own damage path
+    int32_t offMaxHp;        // 0x78  max-HP field on the health controller (0x4C <=1.2.8, 0x50 on 1.3.0)
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 120, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 124, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 120;
+static const int      kMapSize = 124;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -2420,13 +2421,21 @@ static void StuckMonsterTick()
 
 // God mode: refill every hero in the stage, not only the three UI slots (some modes,
 // e.g. Plague, may field heroes that the slot mapping does not resolve).
+// 1.3.0 inserted a float into the health controller, so this is per build now. The default
+// matches every build up to 1.2.8, for a trainer too old to publish the offset.
+static size_t MaxHpOffset()
+{
+    int32_t published = g_shared ? g_shared->offMaxHp : 0;
+    return (published > 0 && published < 0x400) ? static_cast<size_t>(published) : 0x4C;
+}
+
 static const float kGodModeHp = 2.0e9f;   // just under int.MaxValue (the game may cast HP to int)
 static void ApplyGodModeAllHeroes()
 {
     ForEachUnitHealth(1, [](void*, uint8_t* hp)   // DamageableType.Hero
     {
         float& current = *reinterpret_cast<float*>(hp + 0x40);
-        float& maxHp = *reinterpret_cast<float*>(hp + 0x4C);
+        float& maxHp = *reinterpret_cast<float*>(hp + MaxHpOffset());
         if (current <= 0.0f) return;         // already dead: leave the game's death flow alone
         if (maxHp < kGodModeHp) maxHp = kGodModeHp;
         current = maxHp;
@@ -2555,7 +2564,7 @@ static bool ApplyHeroLocks(int32_t heroIndex)
         {
             uint8_t* hp = reinterpret_cast<uint8_t*>(health);
             if (locks.currentHp) *reinterpret_cast<float*>(hp + 0x40) = locks.currentHpValue;
-            if (locks.maxHp) *reinterpret_cast<float*>(hp + 0x4C) = locks.maxHpValue;
+            if (locks.maxHp) *reinterpret_cast<float*>(hp + MaxHpOffset()) = locks.maxHpValue;
         }
     }
     return true;
@@ -3884,7 +3893,7 @@ static void RunSelfCheck()
         if (health)
         {
             cur = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + 0x40);
-            max = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + 0x4C);
+            max = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + MaxHpOffset());
         }
         const HeroLocks& locks = g_heroLocks[i];
         int locked = (locks.currentHp ? 1 : 0) + (locks.maxHp ? 1 : 0) +
@@ -4091,7 +4100,7 @@ static void RunHeroCommand()
                 if (g_heroScan->command == 1 || g_heroScan->command == 5)
                     *reinterpret_cast<float*>(hp + 0x40) = g_heroScan->value;
                 if (g_heroScan->command == 2 || g_heroScan->command == 5)
-                    *reinterpret_cast<float*>(hp + 0x4C) = g_heroScan->value;
+                    *reinterpret_cast<float*>(hp + MaxHpOffset()) = g_heroScan->value;
                 ok = true;
                 label = g_heroScan->command == 1 ? "Current HP" :
                         g_heroScan->command == 2 ? "Max HP" : "Current + Max HP";
@@ -4363,10 +4372,12 @@ static void RunHeroScan()
         {
             uint8_t* hp = reinterpret_cast<uint8_t*>(health);
             pos = ScanAppend(text, cap, pos,
-                "  HP raw: +38=%.6g +3C=%.6g +40=%.6g +44=%.6g +48=%.6g +4C=%.6g\r\n",
+                "  HP raw: +38=%.6g +3C=%.6g +40=%.6g +44=%.6g +48=%.6g +4C=%.6g +50=%.6g +54=%.6g  (max HP read from +%X)\r\n",
                 *reinterpret_cast<float*>(hp + 0x38), *reinterpret_cast<float*>(hp + 0x3C),
                 *reinterpret_cast<float*>(hp + 0x40), *reinterpret_cast<float*>(hp + 0x44),
-                *reinterpret_cast<float*>(hp + 0x48), *reinterpret_cast<float*>(hp + 0x4C));
+                *reinterpret_cast<float*>(hp + 0x48), *reinterpret_cast<float*>(hp + 0x4C),
+                *reinterpret_cast<float*>(hp + 0x50), *reinterpret_cast<float*>(hp + 0x54),
+                static_cast<unsigned>(MaxHpOffset()));
         }
 
     }

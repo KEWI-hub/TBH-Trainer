@@ -65,6 +65,9 @@ internal sealed class GameBuildProfile
     /// <summary>pl.gxf(float damage, Unit attacker) - the health controller's damage entry,
     /// which runs the game's whole kill path including the loot roll.</summary>
     public int MonsterDamageRva { get; init; }
+    /// <summary>Max-HP field on the health controller: 0x4C up to 1.2.8, 0x50 from 1.3.0
+    /// (the class gained a float). 0 means the hook keeps its own default.</summary>
+    public int MaxHpOffset { get; init; }
 
     /// <summary>int AccountStatus.llw(EAccountStatus) - reads one account upgrade value.</summary>
     public int AccStatusGetRva { get; init; }
@@ -286,6 +289,7 @@ internal sealed class GameBuildProfile
         BoxCountRva   = 0x96D650,   // wh.uy.jig(EBoxType, EContentType) -> box count
         MonsterDieRva = 0xD079C0,   // Monster.gwm(Unit) -> finishes a monster the normal way
         MonsterDamageRva = 0xD10D00, // pl.gxf(float, Unit) -> damages it as a hero would
+        MaxHpOffset = 0x4C,
         SlotMoveRva   = 0x8EEFD0,   // rz.ije (called by SlotInteractionManager drop; clone fap has none)
         AccStatusGetRva = 0xA8F440, // AccountStatus.llw(EAccountStatus) -> int
         AccStatusSetRva = 0xA8F4D0, // AccountStatus.llx(EAccountStatus, int)
@@ -295,7 +299,59 @@ internal sealed class GameBuildProfile
         HeroStatsVerified = true,
     };
 
-    public static IReadOnlyList<GameBuildProfile> All { get; } = [V128, V127, V126, V124, V1009, V1008];
+    /// <summary>
+    /// Taskbar Hero 1.3.0 (Steam build 26124855, 2026-10-22). The ACTk detectors moved and the
+    /// generic layout scan no longer finds them: the three ObscuredCheatingDetector methods are
+    /// still 0x190 and 0x270 apart, but InjectionDetector sits at -0xA00 instead of -0xAE0 and
+    /// SpeedHackDetector jumped from +0x4F10 to +0x103C0, so verifying the whole cluster fails.
+    ///
+    /// Each RVA below was matched by method shape against the same class in 1.2.8 and then
+    /// confirmed by its prologue bytes. ACTk file offset = RVA - 0xE00, same as before.
+    ///
+    /// Unit's field layout is unchanged from 1.2.8 (0x104 attack damage through 0x2A0 elemental
+    /// block, resistances still in the dictionary at 0x260), so the hero features are on. The
+    /// obfuscated game-API RVAs have not been re-derived yet, so everything that needs one -
+    /// item spawn, stash, boxes, account upgrades, the stranded-monster handler - stays off.
+    /// </summary>
+    public static GameBuildProfile V130 { get; } = new()
+    {
+        VersionLabel = "1.3.0",
+        BuildId = 10300,
+        ActkTargets =
+        [
+            ("ObscuredCheatingDetector.Check",       0x7421A0, 0x7413A0, [0x41, 0x56, 0x48, 0x83, 0xEC, 0x20]),
+            ("ObscuredCheatingDetector.Compare",     0x742330, 0x741530, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("ObscuredCheatingDetector.CompareExt",  0x742410, 0x741610, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("InjectionDetector.Check",              0x7417A0, 0x7409A0, [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20]),
+            ("SpeedHackDetector.Update",             0x752560, 0x751760, [0x40, 0x56, 0x48, 0x83, 0xEC, 0x70]),
+            ("SpeedHackDetector.OnApplicationPause", 0x7524D0, 0x7516D0, [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57]),
+        ],
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0,
+        ItemInfoRva = 0,
+        SlotUidRva = 0,
+        StashCacheRva = 0,
+        BoxCountRva = 0,
+        MonsterDieRva = 0,
+        MonsterDamageRva = 0,
+        MaxHpOffset = 0x50,   // 1.3.0 inserted a float before it
+        SlotMoveRva = 0,
+        AccStatusGetRva = 0,
+        AccStatusSetRva = 0,
+        StashNamespace = "wh",
+        GameApiVerified = false,
+        ItemScanSupported = false,
+        HeroStatsVerified = true,
+    };
+
+    public static IReadOnlyList<GameBuildProfile> All { get; } = [V130, V128, V127, V126, V124, V1009, V1008];
 
     public static GameBuildProfile? Detect(GameMemory mem)
     {
