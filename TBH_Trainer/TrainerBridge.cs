@@ -21,11 +21,9 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffApplyAtk     = 0x18;
     private const long OffAtkValue     = 0x1C;
     private const long OffStatus       = 0x20;
-    private const long OffSpawnRequest = 0x24;
-    private const long OffSpawnItemKey = 0x28;
-    private const long OffSpawnGrade   = 0x2C;
-    private const long OffSpawnResult  = 0x30;
-    private const long OffSpawnDetail  = 0x34;
+    // 0x24..0x37 held the item-spawn request block. Spawn is gone (the game flags a spawned
+    // item so it cannot be sold), but the five slots stay reserved so every other offset in
+    // SharedState keeps its address.
     private const long OffBuildId      = 0x38;
     private const long OffRvaStashJbg  = 0x3C;
     private const long OffRvaStashJbp  = 0x40;
@@ -162,72 +160,7 @@ internal sealed class TrainerBridge : IDisposable
         return false;
     }
 
-    public bool SpawnItem(int itemKey, GradeType grade = GradeType.Legendary, int timeoutMs = 5000)
-    {
-        if (_view == null) return false;
-        if (!WaitForStash(Math.Min(timeoutMs, 8000)))
-            return false;
 
-        _view.Write(OffSpawnResult, 0);
-        _view.Write(OffSpawnItemKey, itemKey);
-        _view.Write(OffSpawnGrade, (int)grade);
-        Thread.Sleep(1);
-
-        int prev = _view.ReadInt32(OffSpawnRequest);
-        _view.Write(OffSpawnRequest, prev + 1);
-
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        while (DateTime.UtcNow < deadline)
-        {
-            int result = _view.ReadInt32(OffSpawnResult);
-            if (result == 1) return true;
-            if (result < 0) return false;
-            Thread.Sleep(20);
-        }
-        return false;
-    }
-
-    public int LastSpawnErrorCode => _view?.ReadInt32(OffSpawnResult) ?? 0;
-
-    /// <summary>On success: remapped ItemKey if &gt; 1000; on failure: negative error code in spawnResult.</summary>
-    public int LastSpawnDetail => _view?.ReadInt32(OffSpawnDetail) ?? 0;
-
-    public static string DescribeSpawnError(int code) => code switch
-    {
-        -2 => "Invalid ItemKey — not in game data (try an ID from ItemInfoData / an item you own).",
-        -3 => "Could not create item instance (isi/ges failed).",
-        -4 => "No empty stash slot.",
-        -5 => "Stash insert (jbo/jbn) failed.",
-        -6 => "Game rejected add item (isk/blk AddItemResult).",
-        int c when c <= -100 && c > -200 =>
-            $"Game AddItemResult code {-100 - c} (inventory full? wait 1s between spawns).",
-        -7 => "Grade not available for that ItemKey — pick an ID from the catalog with that rarity.",
-        -8 => "Spawn busy — wait for the previous spawn to finish (do not spam click).",
-        -1 => "Spawn API failed.",
-        _  => $"Spawn error code {code}."
-    };
-
-    public int SpawnItems(int itemKey, GradeType grade, int count, int delayBetweenMs = 400)
-    {
-        int success = 0;
-        for (int i = 0; i < count; i++)
-        {
-            for (int attempt = 0; attempt < 4; attempt++)
-            {
-                if (SpawnItem(itemKey, grade, 6000))
-                {
-                    success++;
-                    break;
-                }
-                if (LastSpawnErrorCode != -8)
-                    break;
-                Thread.Sleep(200);
-            }
-            if (i < count - 1)
-                Thread.Sleep(delayBetweenMs);
-        }
-        return success;
-    }
 
     public bool WaitHeartbeat(int waitMs = 500)
     {

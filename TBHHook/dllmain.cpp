@@ -1,6 +1,5 @@
 // TBHHook.dll - injected into TaskBarHero.exe (Il2Cpp).
 // Phase 1: game speed control via UnityEngine.Time::set_timeScale.
-// Phase 2: Item spawn via ud.Stash.jbg + StashCache construction.
 // Communicates with the C# trainer through a named shared-memory block.
 
 #include <windows.h>
@@ -29,11 +28,13 @@ struct SharedState
     int32_t applyAtk;      // 0x18
     float   atkValue;      // 0x1C
     int32_t status;        // 0x20  bit0=il2cpp, bit1=Time, bit2=Stash
-    int32_t spawnRequest;  // 0x24
-    int32_t spawnItemKey;  // 0x28
-    int32_t spawnGrade;    // 0x2C
-    int32_t spawnResult;   // 0x30  1=ok -1=fail -2=bad key -3=create fail -4=stash full
-    int32_t spawnDetail;   // 0x34  last failing step (debug)
+    // 0x24..0x37: the item-spawn request block. Spawn is gone - a spawned item is flagged by
+    // the game and cannot be sold - but the slots stay so every later offset keeps its address.
+    int32_t reserved0;     // 0x24
+    int32_t reserved1;     // 0x28
+    int32_t reserved2;     // 0x2C
+    int32_t reserved3;     // 0x30
+    int32_t reserved4;     // 0x34
     int32_t buildId;       // 0x38  10008 / 10009 / 10204 (0 = not published yet)
     int32_t rvaStashJbg;   // 0x3C  from trainer (0 = use default)
     int32_t rvaStashJbp;   // 0x40
@@ -105,7 +106,6 @@ static const wchar_t* kHeroScanMapName = L"TBHTrainerHeroes";
 static const int32_t  kHeroScanMagic   = 0x48524854;
 static HeroScanState* g_heroScan       = nullptr;
 static int32_t    g_lastHeroScanReq    = 0;
-static volatile LONG g_spawnBusy   = 0;
 static int32_t    g_remapInKey     = 0;
 static int32_t    g_remapInGrade   = -1;
 static int32_t    g_remapOutKey    = 0;
@@ -229,9 +229,7 @@ static void*        g_yqInstance        = nullptr;
 static void*        g_looMethod         = nullptr;
 static void*        g_lopMethod         = nullptr;
 static void*        g_addItemResultClass = nullptr;
-static int32_t      g_lastSpawnDetail   = 0;
 static void*        g_stashSaveCtor     = nullptr;
-static int32_t      g_lastSpawnReq      = 0;
 static uint64_t     g_nextUniqueId      = 0xDEAD000000000001ULL;
 static uintptr_t    g_rvaStashJbg       = kDefaultRvaStashJbg;
 static uintptr_t    g_rvaStashJbp       = kDefaultRvaStashJbp;
@@ -1264,12 +1262,6 @@ static bool AddItemResultOk(void* resultPtr)
     return code == 0 || code == 1;
 }
 
-static void SetSpawnFailFromResult(void* resultPtr)
-{
-    int32_t code = ReadAddResultCode(resultPtr);
-    g_lastSpawnDetail = (code >= 0 && code <= 99) ? (-100 - code) : -6;
-}
-
 static void* ResolveItemInfo(int32_t itemKey)
 {
     void* exc = nullptr;
@@ -1360,45 +1352,6 @@ static int32_t FindItemKeyAlternateGrade(int32_t itemKey, int32_t targetGrade)
     return itemKey;
 }
 
-static int32_t ResolveSpawnItemKey(int32_t itemKey, int32_t requestedGrade, int32_t* outOriginalGrade)
-{
-    ResolveYqInstance();
-    int32_t catalog = GetCatalogGradeForKey(itemKey);
-    int32_t digit = KeyGradeDigit(itemKey);
-    if (outOriginalGrade) *outOriginalGrade = (catalog >= 0 ? catalog : digit);
-
-    if (requestedGrade < 0 || requestedGrade > 10) return itemKey;
-
-    // Catalog ID already encodes grade in digit X of 30XYYY — do not remap 318192 etc.
-    if (digit == requestedGrade) return itemKey;
-    if (catalog == requestedGrade) return itemKey;
-
-    if (itemKey == g_remapInKey && requestedGrade == g_remapInGrade && g_remapOutKey > 0)
-        return g_remapOutKey;
-
-    int32_t remapped = RemapItemKeyDigitGrade(itemKey, requestedGrade);
-    if (remapped != itemKey && KeyGradeDigit(remapped) == requestedGrade &&
-        GetCatalogGradeForKey(remapped) == requestedGrade)
-    {
-        g_remapInKey = itemKey;
-        g_remapInGrade = requestedGrade;
-        g_remapOutKey = remapped;
-        return remapped;
-    }
-
-    remapped = FindItemKeyAlternateGrade(itemKey, requestedGrade);
-    if (remapped != itemKey && KeyGradeDigit(remapped) == requestedGrade &&
-        GetCatalogGradeForKey(remapped) == requestedGrade)
-    {
-        g_remapInKey = itemKey;
-        g_remapInGrade = requestedGrade;
-        g_remapOutKey = remapped;
-        return remapped;
-    }
-
-    return itemKey;
-}
-
 static void* CreateItemInstanceWithGrade(void* itemInfo, uint64_t uid, int32_t grade)
 {
     if (!itemInfo) return nullptr;
@@ -1474,199 +1427,6 @@ static int32_t FindEmptySlotIndex()
         }
     }
     return FindEmptySlot(nullptr);
-}
-
-static bool SpawnViaJbo(int32_t itemKey, int32_t grade)
-{
-    if (!g_jboMethod) return false;
-    if (!ResolveItemAdd()) return false;
-
-    void* itemInfo = ResolveItemInfo(itemKey);
-    if (!itemInfo)
-    {
-        g_lastSpawnDetail = -2;
-        return false;
-    }
-
-    uint64_t uid = g_nextUniqueId++;
-    void* itemInst = CreateItemInstanceWithGrade(itemInfo, uid, grade);
-    if (!itemInst)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-
-    if (g_jbi)
-    {
-        void* exc = nullptr;
-        il2cpp_runtime_invoke(g_jbi, nullptr, nullptr, &exc);
-    }
-
-    void* args[2] = { &uid, itemInst };
-    void* exc = nullptr;
-    il2cpp_runtime_invoke(g_jboMethod, nullptr, args, &exc);
-    if (exc)
-    {
-        g_lastSpawnDetail = -5;
-        return false;
-    }
-    return true;
-}
-
-static bool SpawnViaIsk(int32_t itemKey)
-{
-    if (!g_iskMethod) return false;
-    if (!ResolveItemAdd()) return false;
-    BumpUniqueIdSeed();
-
-    uint64_t uid = g_nextUniqueId++;
-    bool notify = true;
-    void* args[3] = { &itemKey, &uid, &notify };
-    void* exc = nullptr;
-    void* ret = il2cpp_runtime_invoke(g_iskMethod, nullptr, args, &exc);
-    if (exc)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-    if (!AddItemResultOk(ret))
-    {
-        SetSpawnFailFromResult(ret);
-        return false;
-    }
-    return true;
-}
-
-static bool SpawnViaBlk(int32_t itemKey)
-{
-    if (!ResolveItemAdd() || !g_blkMethod) return false;
-    BumpUniqueIdSeed();
-
-    uint64_t uid = g_nextUniqueId++;
-    bool notify = true;
-    // 1.2.4 jiv(int itemKey, ulong uid, EItemGetSourceType source, int count, bool notify):
-    // report the item as a normal monster drop (MonsterDieReward = 6), one at a time.
-    int32_t source = 6;
-    int32_t count = 1;
-    void* args3[3] = { &itemKey, &uid, &notify };
-    void* args5[5] = { &itemKey, &uid, &source, &count, &notify };
-    void* exc = nullptr;
-    void* ret = il2cpp_runtime_invoke(g_blkMethod, nullptr, g_blkArgCount == 5 ? args5 : args3, &exc);
-    if (exc)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-    if (!AddItemResultOk(ret))
-    {
-        SetSpawnFailFromResult(ret);
-        return false;
-    }
-    return true;
-}
-
-static bool SpawnViaAddApis(int32_t spawnKey)
-{
-    // Prefer blk (inventory) — one API only; do not chain on success
-    if (g_blkMethod && SpawnViaBlk(spawnKey))
-        return true;
-    if (g_iskMethod && SpawnViaIsk(spawnKey))
-        return true;
-    return false;
-}
-
-static bool SpawnViaStash(int32_t itemKey, int32_t grade)
-{
-    if (!g_stashCacheClass || (!g_jbg && !g_nativeJbg)) return false;
-    if (!ResolveItemAdd()) return false;
-
-    void* itemInfo = ResolveItemInfo(itemKey);
-    if (!itemInfo)
-    {
-        g_lastSpawnDetail = -2;
-        return false;
-    }
-
-    uint64_t uid = g_nextUniqueId++;
-    void* itemInst = CreateItemInstanceWithGrade(itemInfo, uid, grade);
-    if (!itemInst)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-
-    if (g_jboMethod)
-    {
-        void* argsJbo[2] = { &uid, itemInst };
-        void* exc = nullptr;
-        il2cpp_runtime_invoke(g_jboMethod, nullptr, argsJbo, &exc);
-        if (!exc) return true;
-        g_lastSpawnDetail = -5;
-        return false;
-    }
-
-    if (g_jbi)
-    {
-        void* exc = nullptr;
-        il2cpp_runtime_invoke(g_jbi, nullptr, nullptr, &exc);
-    }
-
-    int32_t slotIdx = FindEmptySlotIndex();
-    if (slotIdx < 0)
-    {
-        g_lastSpawnDetail = -4;
-        return false;
-    }
-
-    void* saveObj = nullptr;
-    if (g_stashSaveClass && g_stashSaveCtor)
-    {
-        saveObj = il2cpp_object_new(g_stashSaveClass);
-        if (saveObj)
-        {
-            void* ctorArgs[1] = { &slotIdx };
-            void* exc = nullptr;
-            il2cpp_runtime_invoke(g_stashSaveCtor, saveObj, ctorArgs, &exc);
-            if (!exc)
-            {
-                SetFieldInt32(saveObj, g_stashSaveClass, "Index", slotIdx);
-                SetFieldUInt64(saveObj, g_stashSaveClass, "ItemUniqueId", uid);
-                SetFieldBool(saveObj, g_stashSaveClass, "IsUnLock", true);
-            }
-        }
-    }
-    if (!saveObj)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-
-    void* cacheObj = il2cpp_object_new(g_stashCacheClass);
-    if (!cacheObj)
-    {
-        g_lastSpawnDetail = -3;
-        return false;
-    }
-
-    void* cacheCtor = il2cpp_class_get_method_from_name(g_stashCacheClass, ".ctor", 1);
-    if (cacheCtor)
-    {
-        void* ctorArgs[1] = { saveObj };
-        void* exc = nullptr;
-        il2cpp_runtime_invoke(cacheCtor, cacheObj, ctorArgs, &exc);
-        if (exc)
-        {
-            g_lastSpawnDetail = -5;
-            return false;
-        }
-    }
-
-    if (!InvokeJbg(nullptr, uid, cacheObj))
-    {
-        g_lastSpawnDetail = -5;
-        return false;
-    }
-    return true;
 }
 
 static void EnsureItemMetaTypes()
@@ -4401,49 +4161,6 @@ static bool ScanUidLine(char* text, size_t cap, size_t& pos, const char* source,
     return true;
 }
 
-static void RunItemCatalogDump()
-{
-    if (!g_scan) return;
-    g_scan->done = 0;
-    g_scan->length = 0;
-    memset(g_scan->text, 0, sizeof(g_scan->text));
-
-    EnsureItemMetaTypes();
-    ResolveItemAdd();
-    void* yq = ResolveYqInstance();
-
-    char* text = g_scan->text;
-    const size_t cap = sizeof(g_scan->text);
-    size_t pos = 0;
-    int32_t count = 0;
-    bool truncated = false;
-
-    pos = ScanAppend(text, cap, pos,
-        "=== TBH item catalog (all ItemInfoData from the item database) ===\r\n"
-        "Format: ITEM itemKey grade=N (Name)\r\n\r\n");
-
-    if (!yq)
-    {
-        pos = ScanAppend(text, cap, pos,
-            "ERROR: item database not found (load into main menu / stash first).\r\n");
-        g_scan->length = (int32_t)pos;
-        g_scan->done = -1;
-        return;
-    }
-
-    pos = CatalogAppendFromList(yq, text, cap, pos, count, truncated);
-    if (count == 0)
-        pos = CatalogAppendFromDict(yq, text, cap, pos, count, truncated);
-
-    pos = ScanAppend(text, cap, pos, "\r\nTotal: %d item(s).", count);
-    if (truncated)
-        pos = ScanAppend(text, cap, pos, " (TRUNCATED — increase scan buffer or export partial)");
-    pos = ScanAppend(text, cap, pos, "\r\n");
-
-    g_scan->length = (int32_t)(pos < cap ? pos : cap - 1);
-    g_scan->done = truncated ? 2 : 1;
-}
-
 static void RunItemScan()
 {
     if (!g_scan) return;
@@ -4548,42 +4265,6 @@ static void RunItemScan()
     g_scan->done = 1;
 }
 
-static bool SpawnItem(int32_t itemKey, int32_t grade)
-{
-    g_lastSpawnDetail = 0;
-    TryResolveStash();
-    ResolveItemAdd();
-
-    int32_t catalogGrade = -1;
-    int32_t spawnKey = ResolveSpawnItemKey(itemKey, grade, &catalogGrade);
-    const int32_t keyDigit = KeyGradeDigit(itemKey);
-    const bool gradeMismatch = (grade >= 0 && spawnKey == itemKey &&
-                                keyDigit != grade &&
-                                catalogGrade >= 0 && catalogGrade != grade);
-
-    if (gradeMismatch)
-    {
-        g_lastSpawnDetail = -7;
-        return false;
-    }
-
-    if (!ItemKeyExists(spawnKey))
-    {
-        g_lastSpawnDetail = -2;
-        return false;
-    }
-
-    // Fast path: ti.blk / ti.isk (inventory). Stash path only if both fail.
-    if (SpawnViaAddApis(spawnKey))
-        return true;
-
-    if (SpawnViaJbo(spawnKey, -1)) return true;
-    if (SpawnViaStash(spawnKey, -1)) return true;
-
-    if (g_lastSpawnDetail == 0) g_lastSpawnDetail = -1;
-    return false;
-}
-
 static DWORD WINAPI WorkerThread(LPVOID)
 {
     // Up to 2 minutes: on a cold start (first launch after a reboot) the game can take a
@@ -4614,7 +4295,6 @@ static DWORD WINAPI WorkerThread(LPVOID)
         MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, kMapSize));
     if (!g_shared) return 0;
     g_shared->magic       = kMagic;
-    g_shared->spawnResult = 0;
 
     HANDLE hScanMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                          0, kScanMapSize, kScanMapName);
@@ -4656,7 +4336,6 @@ static DWORD WINAPI WorkerThread(LPVOID)
     TryResolveStash();
     statusFlags = BuildStatusFlags();
     g_shared->status = statusFlags;
-    g_lastSpawnReq   = g_shared->spawnRequest;
 
     bool wasEnabled = false;
     InstallShutdownWatch();
@@ -4711,7 +4390,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
         {
             float ts = g_shared->timeScale;
             if (ts < 0.0f)   ts = 0.0f;
-            if (ts > 20.0f)  ts = 20.0f;   // trainer MaxSpeed
+            if (ts > 5.0f)   ts = 5.0f;    // trainer MaxSpeed
             SetTimeScale(ts);
             wasEnabled = true;
         }
@@ -4739,52 +4418,11 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 ApplyHeroLocks(heroIndex);
         }
 
-        int32_t curReq = g_shared->spawnRequest;
-        if (curReq != g_lastSpawnReq)
-        {
-            int32_t reqKey = g_shared->spawnItemKey;
-            int32_t reqGrade = g_shared->spawnGrade;
-            if (g_shared->spawnRequest != curReq)
-                continue;
-
-            if (InterlockedCompareExchange(&g_spawnBusy, 1, 0) != 0)
-            {
-                g_lastSpawnReq = curReq;
-                g_shared->spawnDetail = 0;
-                g_shared->spawnResult = -8;
-                continue;
-            }
-
-            g_lastSpawnReq = curReq;
-            TryResolveStash();
-            if (!g_stashInstance)
-                g_stashInstance = ResolveStashInstance();
-
-            bool ok = SpawnItem(reqKey, reqGrade);
-            int32_t catalogGrade = -1;
-            int32_t usedKey = ResolveSpawnItemKey(reqKey, reqGrade, &catalogGrade);
-            if (ok)
-                g_shared->spawnDetail = (usedKey != reqKey) ? usedKey : 0;
-            else
-            {
-                if (g_lastSpawnDetail != 0)
-                    g_shared->spawnDetail = g_lastSpawnDetail;
-                else if (usedKey != reqKey)
-                    g_shared->spawnDetail = usedKey;
-                else
-                    g_shared->spawnDetail = -1;
-            }
-            g_shared->spawnResult = ok ? 1 : (g_lastSpawnDetail != 0 ? g_lastSpawnDetail : -1);
-            InterlockedExchange(&g_spawnBusy, 0);
-        }
 
         if (g_scan && g_scan->request != g_lastScanReq)
         {
             g_lastScanReq = g_scan->request;
-            if (g_scan->request & 1)
-                RunItemCatalogDump();
-            else
-                RunItemScan();
+            RunItemScan();   // the catalog dump went with item spawn
         }
 
         if (g_heroScan && g_heroScan->request != g_lastHeroScanReq)

@@ -45,15 +45,7 @@ internal sealed class MainForm : Form
     private Button _btnChestUpgrades = null!;
     private Button _btnChestLog = null!;
 
-    private TextBox _txtItemKey = null!;
-    private ComboBox _cmbGrade = null!;
-    private TextBox _txtSpawnCount = null!;
-    private Button _btnSpawnItem = null!;
-    private Button _btnScanItems = null!;
-    private Button _btnExportCatalog = null!;
-    private Label _lblSpawnStatus = null!;
     private ItemScanBridge? _scanBridge;
-    private DateTime _lastSpawnClick = DateTime.MinValue;
 
     private TextBox _txtLog = null!;
     private Panel _header = null!;
@@ -91,7 +83,9 @@ internal sealed class MainForm : Form
     private static string DllPath => Path.Combine(AppContext.BaseDirectory, "TBHHook.dll");
 
     /// <summary>Speedhack ceiling; TBHHook clamps timeScale to the same value.</summary>
-    private const float MaxSpeed = 20f;
+    // 20x stalled stages and got heroes killed on 1.3.0 even with god mode on; 5x is the
+    // fastest that stays stable, and stranded monsters stop happening there at all.
+    private const float MaxSpeed = 5f;
 
     public MainForm()
     {
@@ -403,56 +397,13 @@ internal sealed class MainForm : Form
         _pnlSpeed.Controls.AddRange(new Control[] { _trkSpeed, _txtSpeed, _lblSpeedValue, _lblSpeedStatus });
         grp3.Controls.Add(_pnlSpeed);
 
-        // === 4. Stash Item Spawn (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Stash Item Spawn", ref y, 205);
-        grp6.Controls.Add(new Label
-        {
-            Text = "Each ItemKey has a fixed rarity in the catalog. Grade picks another row (e.g. 304061 Immortal → Cosmic uses 309161). Export catalog to browse IDs.",
-            Font = new Font("Segoe UI", 8.5f), ForeColor = Color.FromArgb(150, 150, 150),
-            Location = new Point(15, 20), AutoSize = true, MaximumSize = new Size(515, 0)
-        });
-        grp6.Controls.Add(new Label { Text = "ItemKey:", Location = new Point(15, 62), AutoSize = true });
-        _txtItemKey = MakeTxt(75, 59, 100);
-        _txtItemKey.Text = "1001";
-        _txtItemKey.Enabled = false;
+        // === 4. Boxes & Stash (TBHHook + il2cpp) ===
+        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 125);
 
-        grp6.Controls.Add(new Label { Text = "Grade:", Location = new Point(190, 62), AutoSize = true });
-        _cmbGrade = new SafeComboBox
-        {
-            Location = new Point(235, 58), Width = 145, DropDownStyle = ComboBoxStyle.DropDownList,
-            BackColor = BgInput, ForeColor = AccentCyan, FlatStyle = FlatStyle.Flat, Enabled = false
-        };
-        foreach (TrainerBridge.GradeType g in Enum.GetValues<TrainerBridge.GradeType>())
-            _cmbGrade.Items.Add(TrainerBridge.GradeLabel(g));
-        _cmbGrade.SelectedIndex = (int)TrainerBridge.GradeType.Legendary;
-
-        grp6.Controls.Add(new Label { Text = "Count:", Location = new Point(395, 62), AutoSize = true });
-        _txtSpawnCount = MakeTxt(443, 59, 55);
-        _txtSpawnCount.Text = "1";
-        _txtSpawnCount.Enabled = false;
-
-        _btnSpawnItem = MakeBtn("Spawn", 15, 94, 105);
-        _btnSpawnItem.Enabled = false;
-        _btnSpawnItem.Click += OnSpawnItem;
-
-        _btnScanItems = MakeBtn("Scan items", 130, 94, 105);
-        _btnScanItems.Enabled = false;
-        _btnScanItems.Click += OnScanItems;
-
-        _btnExportCatalog = MakeBtn("Export catalog", 245, 94, 120);
-        _btnExportCatalog.Enabled = false;
-        _btnExportCatalog.Click += OnExportCatalog;
-
-        _lblSpawnStatus = new Label
-        {
-            Text = "Hook required", Location = new Point(378, 101), AutoSize = true,
-            MaximumSize = new Size(150, 34),
-            ForeColor = TextDim, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
-        };
         // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
         _chkAutoOpenBoxes = new CheckBox
         {
-            Text = "Auto open boxes (every 2s)", Location = new Point(15, 136), AutoSize = true,
+            Text = "Auto open boxes (every 2s)", Location = new Point(15, 26), AutoSize = true,
             ForeColor = TextMain, Checked = true
         };
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
@@ -461,22 +412,22 @@ internal sealed class MainForm : Form
         // Stash page 1 is kept for soul stones only; nothing else is sorted.
         _chkBagToStash = new CheckBox
         {
-            Text = "Bag → stash when full (page 1 = soul stones)", Location = new Point(230, 136), AutoSize = true,
+            Text = "Bag → stash when full (page 1 = soul stones)", Location = new Point(230, 26), AutoSize = true,
             ForeColor = TextMain, Checked = true
         };
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
 
-        _btnBagToStashNow = MakeBtn("Empty bag now", 15, 162, 150);
+        _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
         _btnBagToStashNow.Enabled = false;
         _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
-        _btnChestUpgrades = MakeBtn("Chest upgrades", 175, 162, 140);
+        _btnChestUpgrades = MakeBtn("Chest upgrades", 175, 56, 140);
         _btnChestUpgrades.Enabled = false;
         _btnChestUpgrades.Click += (_, _) => OnChestUpgrades();
-        _btnChestLog = MakeBtn("Chest log", 325, 162, 120);
+        _btnChestLog = MakeBtn("Chest log", 325, 56, 120);
         _btnChestLog.Enabled = false;
         _btnChestLog.Click += (_, _) => OnChestLog();
 
-        grp6.Controls.AddRange(new Control[] { _txtItemKey, _cmbGrade, _txtSpawnCount, _btnSpawnItem, _btnScanItems, _btnExportCatalog, _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog, _lblSpawnStatus });
+        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -750,7 +701,7 @@ internal sealed class MainForm : Form
             _btnWriteHeroStat.Enabled = false;
             _btnMaxHeroStats.Enabled = false;
             _btnSelfCheck.Enabled = false;
-            SetSpawnControlsEnabled(false);
+        SetGameApiControlsEnabled(false);
             Log("Disconnected. The hook is idle now — it is safe to close the game.");
             return;
         }
@@ -819,11 +770,7 @@ internal sealed class MainForm : Form
             _btnWriteHeroStat.Enabled = HeroApiAllowed;
             _btnMaxHeroStats.Enabled = HeroApiAllowed;
             _btnSelfCheck.Enabled = true;
-            SetSpawnControlsEnabled(GameApiAllowed);
-            _lblSpawnStatus.Text = GameApiAllowed
-                ? "Connect hook (enable speed or spawn)"
-                : $"Not supported on {(_buildDetected ? _buildProfile.VersionLabel : "unknown build")}";
-            _lblSpawnStatus.ForeColor = TextDim;
+            SetGameApiControlsEnabled(GameApiAllowed);
             Log($"Connected! PID {_pid} | GameAssembly.dll base: 0x{_mem.GameAssemblyBase.ToInt64():X}");
             AutoSetupAfterConnect();
         }
@@ -951,23 +898,8 @@ internal sealed class MainForm : Form
         Log($"Bridge connected. build={_buildProfile.VersionLabel} il2cpp={_bridge.Il2CppReady}, Time={_bridge.TimeResolved}, Stash={_bridge.StashResolved}.");
         if (!_bridge.TimeResolved)
             Log("WARNING: UnityEngine.Time::set_timeScale not resolved; speed may not apply.");
-        if (!GameApiAllowed)
-        {
-            // Stash API is intentionally not published for this build — nothing to wait for.
-            _lblSpawnStatus.Text = $"Not supported on {(_buildDetected ? _buildProfile.VersionLabel : "unknown build")}";
-            _lblSpawnStatus.ForeColor = TextDim;
-        }
-        else if (!_bridge.StashResolved)
-        {
-            Log("WARNING: stash API not resolved; item spawn will fail until the game is fully loaded.");
-            _lblSpawnStatus.Text = "Stash API not ready";
-            _lblSpawnStatus.ForeColor = Color.FromArgb(255, 200, 50);
-        }
-        else
-        {
-            _lblSpawnStatus.Text = "Ready to spawn";
-            _lblSpawnStatus.ForeColor = Color.FromArgb(100, 255, 100);
-        }
+        if (GameApiAllowed && !_bridge.StashResolved)
+            Log("Stash API not resolved yet; bag → stash starts working once the game is fully loaded.");
         return true;
     }
 
@@ -986,72 +918,11 @@ internal sealed class MainForm : Form
         return false;
     }
 
-    private void SetSpawnControlsEnabled(bool enabled)
+    private void SetGameApiControlsEnabled(bool enabled)
     {
-        _txtItemKey.Enabled = enabled;
-        _cmbGrade.Enabled = enabled;
-        _txtSpawnCount.Enabled = enabled;
-        _btnSpawnItem.Enabled = enabled;
-        _btnScanItems.Enabled = enabled && (_buildProfile.ItemScanSupported || _buildProfile.InventoryScanSupported);
         _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
         _btnChestUpgrades.Enabled = enabled && _buildProfile.AccStatusGetRva > 0;
         _btnChestLog.Enabled = enabled && _buildProfile.BoxCountRva > 0;
-        _btnExportCatalog.Enabled = enabled;
-    }
-
-    private void OnExportCatalog(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Export catalog")) return;
-        if (!EnsureSpeedReady())
-        {
-            Log("Export aborted: inject TBHHook.dll first.");
-            return;
-        }
-
-        _scanBridge ??= new ItemScanBridge();
-        if (!_scanBridge.TryConnect(3000))
-        {
-            Log("ERROR: scan channel missing — rebuild TBHHook.dll and reinject.");
-            return;
-        }
-
-        _btnExportCatalog.Enabled = false;
-        try
-        {
-            Log("Dumping full item catalog from game data (yq)...");
-            string? report = _scanBridge.RunCatalogDump(20000);
-            if (report == null)
-            {
-                Log("ERROR: catalog dump failed (timeout). Stay in-game on main menu or stash and retry.");
-                return;
-            }
-
-            using var dlg = new SaveFileDialog
-            {
-                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
-                FileName = $"TBH_item_catalog_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
-                Title = "Save item catalog"
-            };
-            if (dlg.ShowDialog(this) != DialogResult.OK)
-            {
-                Log("Export cancelled — showing first lines in log only.");
-                LogCatalogPreview(report, 30);
-                return;
-            }
-
-            File.WriteAllText(dlg.FileName, report, Encoding.UTF8);
-            int lineCount = report.Split('\n').Length;
-            Log($"Catalog saved: {dlg.FileName} ({lineCount} lines).");
-            LogCatalogPreview(report, 15);
-        }
-        catch (Exception ex)
-        {
-            Log($"Export error: {ex.Message}");
-        }
-        finally
-        {
-            _btnExportCatalog.Enabled = true;
-        }
     }
 
     private void LogCatalogPreview(string report, int maxLines)
@@ -1409,107 +1280,6 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void OnScanItems(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Item scan")) return;
-        if (!_buildProfile.ItemScanSupported && _buildProfile.InventoryScanSupported)
-        {
-            RunInventoryScan();
-            return;
-        }
-        if (!_buildProfile.ItemScanSupported)
-        {
-            Log($"Item scan is not supported on {_buildProfile.VersionLabel}. Use Export catalog to find itemKeys.");
-            return;
-        }
-        if (!EnsureSpeedReady())
-        {
-            Log("Scan aborted: inject TBHHook.dll first.");
-            return;
-        }
-
-        Log("Waiting for stash API (open in-game stash)...");
-        if (!_bridge.WaitForStash(10000))
-        {
-            Log("ERROR: Stash API not ready — open the stash screen and try Scan again.");
-            return;
-        }
-
-        _scanBridge ??= new ItemScanBridge();
-        if (!_scanBridge.TryConnect(3000))
-        {
-            Log("ERROR: scan channel missing. Rebuild TBHHook.dll, copy to publish folder, reinject.");
-            return;
-        }
-
-        _btnScanItems.Enabled = false;
-        try
-        {
-            Log("--- Item scan (stash slots + inventory UIDs) ---");
-            string? report = _scanBridge.RunScan(10000);
-            if (report == null)
-            {
-                Log("ERROR: scan failed (timeout or hook exception).");
-                return;
-            }
-
-            int? firstKey = null;
-            TrainerBridge.GradeType? firstGrade = null;
-            foreach (string raw in report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("===") || line.StartsWith("grade =") ||
-                    line.StartsWith("src:") || line.StartsWith("Debug:") ||
-                    line.StartsWith("--") || line.StartsWith("Summary:"))
-                    continue;
-                Log(line);
-
-                if (firstKey.HasValue) continue;
-                int k = line.IndexOf("itemKey=", StringComparison.Ordinal);
-                if (k < 0) continue;
-                string tail = line[(k + 8)..];
-                int sp = tail.IndexOf(' ');
-                string num = sp > 0 ? tail[..sp] : tail;
-                if (int.TryParse(num, out int ik) && ik > 0)
-                {
-                    firstKey = ik;
-                    int g = line.IndexOf("grade=", StringComparison.Ordinal);
-                    if (g >= 0)
-                    {
-                        string gt = line[(g + 6)..];
-                        int gsp = gt.IndexOf(' ');
-                        string gnum = gsp > 0 ? gt[..gsp] : gt;
-                        int giEnd = 0;
-                        while (giEnd < gnum.Length && char.IsDigit(gnum[giEnd])) giEnd++;
-                        if (giEnd > 0 && int.TryParse(gnum[..giEnd], out int gi) &&
-                            TrainerBridge.TryGradeFromInt(gi, out var gr))
-                            firstGrade = gr;
-                    }
-                }
-            }
-
-            if (firstKey.HasValue)
-            {
-                _txtItemKey.Text = firstKey.Value.ToString();
-                if (firstGrade.HasValue)
-                    _cmbGrade.SelectedIndex = (int)firstGrade.Value;
-                Log(firstGrade.HasValue
-                    ? $"→ Filled spawn: ItemKey={firstKey}, {TrainerBridge.GradeLabel(firstGrade.Value)}"
-                    : $"→ Filled ItemKey={firstKey} (grade unchanged)");
-            }
-            else
-                Log("No itemKey found — stash empty or obfuscated names mismatch (rebuild hook).");
-        }
-        catch (Exception ex)
-        {
-            Log($"Scan error: {ex.Message}");
-        }
-        finally
-        {
-            _btnScanItems.Enabled = true;
-        }
-    }
-
     /// <summary>1.2.6+: read-only inventory listing through the game's slot API.</summary>
     private void RunInventoryScan()
     {
@@ -1524,104 +1294,6 @@ internal sealed class MainForm : Form
         if (report == null) { Log("ERROR: inventory scan timed out."); return; }
         foreach (string line in report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
             Log(line);
-    }
-
-    private void OnSpawnItem(object? sender, EventArgs e)
-    {
-        if (!EnsureGameApiAllowed("Item spawn")) return;
-        if (!EnsureSpeedReady())
-        {
-            Log("Spawn aborted: inject TBHHook.dll first (enable speedhack or retry after connect).");
-            return;
-        }
-
-        var sinceLast = DateTime.UtcNow - _lastSpawnClick;
-        if (_lastSpawnClick != DateTime.MinValue && sinceLast.TotalMilliseconds < 800)
-        {
-            Log("Wait ~1 second between spawns (inventory sync).");
-            return;
-        }
-        _lastSpawnClick = DateTime.UtcNow;
-
-        Log("Waiting for stash API (open in-game stash if this takes long)...");
-        if (!_bridge.WaitForStash(10000))
-        {
-            Log("ERROR: Stash API still not resolved after 10s.");
-            Log("  Open the stash screen in-game, wait 2s, then Spawn again.");
-            Log($"  If it persists, the add-item RVAs in GameBuildProfile.{_buildProfile.VersionLabel} need re-mapping (see README.md).");
-            _lblSpawnStatus.Text = "Stash API not ready";
-            _lblSpawnStatus.ForeColor = Color.FromArgb(255, 100, 100);
-            return;
-        }
-        _lblSpawnStatus.Text = "Ready to spawn";
-        _lblSpawnStatus.ForeColor = Color.FromArgb(100, 255, 100);
-
-        if (!int.TryParse(_txtItemKey.Text.Trim(), out int itemKey) || itemKey <= 0)
-        {
-            Log("ERROR: invalid ItemKey (positive integer required).");
-            return;
-        }
-
-        if (!int.TryParse(_txtSpawnCount.Text.Trim(), out int count) || count < 1 || count > 99)
-        {
-            Log("ERROR: spawn count must be 1..99.");
-            return;
-        }
-        if (count > 15)
-            Log("WARNING: high spawn count can lag or crash the game — use 1–5 for testing.");
-
-        TrainerBridge.GradeType grade = TrainerBridge.GradeType.Legendary;
-        if (_cmbGrade.SelectedIndex >= 0 && _cmbGrade.SelectedIndex <= (int)TrainerBridge.GradeType.None)
-            grade = (TrainerBridge.GradeType)_cmbGrade.SelectedIndex;
-
-        int gradeDigit = (itemKey / 1000) % 10;
-        if (itemKey >= 100000 && gradeDigit == (int)grade)
-            Log($"ItemKey {itemKey} already matches {TrainerBridge.GradeLabel(grade)} — no grade remap.");
-        else if (itemKey >= 100000)
-            Log($"Note: for gear IDs use catalog row with digit {(int)grade} (e.g. 31{(int)grade}xxx) or remap from lower grade.");
-
-        _btnSpawnItem.Enabled = false;
-        try
-        {
-            Log($"Spawning {count}x ItemKey={itemKey} {TrainerBridge.GradeLabel(grade)}...");
-            int ok = _bridge.SpawnItems(itemKey, grade, count);
-            if (ok == count)
-            {
-                Log($"Spawn OK: {ok}/{count} items.");
-                int detail = _bridge.LastSpawnDetail;
-                if (detail > 1000)
-                    Log($"  Grade remap: used ItemKey {detail} (catalog row for {grade}).");
-                _lblSpawnStatus.Text = $"Last: {ok}/{count} OK";
-                _lblSpawnStatus.ForeColor = Color.FromArgb(100, 255, 100);
-            }
-            else
-            {
-                Log($"Spawn partial/failed: {ok}/{count} succeeded.");
-                int err = _bridge.LastSpawnErrorCode;
-                int detail = _bridge.LastSpawnDetail;
-                if (err < 0)
-                    Log($"  {TrainerBridge.DescribeSpawnError(err)}");
-                else if (detail < 0)
-                    Log($"  {TrainerBridge.DescribeSpawnError(detail)}");
-                else if (err == 0)
-                    Log("  Timeout — hook did not finish (reinject TBHHook or retry).");
-                if (detail > 1000 && detail != itemKey)
-                    Log($"  Tried remapped ItemKey {detail} for {grade}.");
-                Log("  If AddItemResult code 2+: clear inventory/stash space, wait 1s, retry.");
-                _lblSpawnStatus.Text = $"Last: {ok}/{count}";
-                _lblSpawnStatus.ForeColor = Color.FromArgb(255, 200, 50);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Spawn error: {ex.Message}");
-            _lblSpawnStatus.Text = "Spawn failed";
-            _lblSpawnStatus.ForeColor = Color.FromArgb(255, 100, 100);
-        }
-        finally
-        {
-            _btnSpawnItem.Enabled = true;
-        }
     }
 
     private void OnSpeedToggle(object? sender, EventArgs e)

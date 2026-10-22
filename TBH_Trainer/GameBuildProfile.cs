@@ -334,19 +334,25 @@ internal sealed class GameBuildProfile
         StashSlotRva = 0,
         StashInitRva = 0,
         StashSaveDataCtor = 0,
-        ItemAddRva = 0,
-        ItemInfoRva = 0,
-        SlotUidRva = 0,
-        StashCacheRva = 0,
-        BoxCountRva = 0,
-        MonsterDieRva = 0,
-        MonsterDamageRva = 0,
-        MaxHpOffset = 0x50,   // 1.3.0 inserted a float before it
-        SlotMoveRva = 0,
-        AccStatusGetRva = 0,
-        AccStatusSetRva = 0,
-        StashNamespace = "wh",
-        GameApiVerified = false,
+        // Picked out of the decoy clones by counting E8 call sites in GameAssembly.dll; the
+        // count is in each comment. A clone the game never calls gets none.
+        ItemAddRva = 0x9C0870,       // xo.vu.jzd (23 calls; two clones have none)
+        ItemInfoRva = 0x9C1F00,      // xo.vu.jzo - one of five identical clones, none called
+                                     // directly; picked as jzd's sibling the way 1.2.8 paired
+                                     // jml with jmv
+        SlotUidRva = 0x916C30,       // sj.iuh (28 calls; three clones have none)
+        StashCacheRva = 0xA6E130,    // xo.Stash.lae (35 calls)
+        BoxCountRva = 0x9B4610,      // xo.vq.jux (71 calls). The 40-call sibling only forwards
+                                     // to bcr.mre, which switches on box type and returns 5 -
+                                     // that is the cap, not how many are held
+        MonsterDieRva = 0xE02BC0,    // Monster, the only override bool (Unit) in the class
+        MonsterDamageRva = 0xE0E340, // pl, the only override void (float, Unit) in the class
+        MaxHpOffset = 0x50,          // 1.3.0 inserted a float before it
+        SlotMoveRva = 0x910FF0,      // sj.itb (2 calls; the other six have none)
+        AccStatusGetRva = 0xB1E500,  // AccountStatus.mnm (129 calls)
+        AccStatusSetRva = 0xB1E590,  // AccountStatus.mnn (5 calls; the clone has none)
+        StashNamespace = "xo",       // was "wh" up to 1.2.8
+        GameApiVerified = true,
         ItemScanSupported = false,
         HeroStatsVerified = true,
     };
