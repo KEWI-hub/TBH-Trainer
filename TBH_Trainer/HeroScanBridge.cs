@@ -35,6 +35,22 @@ internal sealed class HeroScanBridge : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Raises a request whose input is a string: the query goes into the text buffer the hook
+    /// otherwise only writes to, and the hook reads it before it clears the buffer.
+    /// </summary>
+    public string? RunQuery(int command, string query, int timeoutMs = 15000)
+    {
+        if (_view == null) return null;
+        var bytes = Encoding.ASCII.GetBytes(query.Length > 90 ? query[..90] : query);
+        _view.WriteArray(OffText, bytes, 0, bytes.Length);
+        _view.Write(OffText + bytes.Length, (byte)0);
+        _view.Write(OffCommand, command);
+        _view.Write(OffHeroIndex, 0);
+        _view.Write(OffValue, 0f);
+        return RunRequest(timeoutMs);
+    }
+
     public string? RunScan(int timeoutMs = 10000)
     {
         if (_view == null) return null;

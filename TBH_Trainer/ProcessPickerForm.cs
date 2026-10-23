@@ -12,7 +12,7 @@ internal sealed class ProcessPickerForm : Form
     private readonly TextBox _filter;
     private List<GameMemory.ProcessEntry> _all = new();
 
-    // Shared DENOISER theme palette (kept in sync with MainForm).
+    // Shared theme palette (kept in sync with MainForm).
     private static readonly Color BgForm     = Color.FromArgb(16, 18, 24);
     private static readonly Color BgInput    = Color.FromArgb(34, 37, 46);
     private static readonly Color BtnBg      = Color.FromArgb(30, 33, 42);

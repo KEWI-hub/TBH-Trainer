@@ -55,7 +55,7 @@ internal sealed class MainForm : Form
     private GameBuildProfile _buildProfile = GameBuildProfile.V1008;
     private bool _buildDetected;
 
-    // === DENOISER theme palette ===
+    // === theme palette ===
     private static readonly Color BgForm     = Color.FromArgb(16, 18, 24);
     private static readonly Color BgInput    = Color.FromArgb(34, 37, 46);
     private static readonly Color BtnBg      = Color.FromArgb(30, 33, 42);
@@ -66,6 +66,54 @@ internal sealed class MainForm : Form
     private static readonly Color TextDim    = Color.FromArgb(135, 140, 156);
 
     private static readonly Bitmap? Logo = LoadEmbedded<Bitmap>("logo.png");
+
+    /// <summary>
+    /// itemKey -> display name, extracted once from the game's localisation bundles (see
+    /// item_names.tsv). The item database only carries the key "ItemName_&lt;itemKey&gt;", and
+    /// resolving that in the game would mean driving Unity's async localisation API for a
+    /// table that does not change between patches.
+    /// </summary>
+    private static Dictionary<int, string> ItemNames => _itemNames ??= LoadItemNames();
+    private static Dictionary<int, string>? _itemNames;
+
+    private static Dictionary<int, string> LoadItemNames()
+    {
+        var map = new Dictionary<int, string>();
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            string? name = asm.GetManifestResourceNames()
+                              .FirstOrDefault(n => n.EndsWith("item_names.tsv", StringComparison.Ordinal));
+            if (name == null) return map;
+            using var stream = asm.GetManifestResourceStream(name)!;
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            while (reader.ReadLine() is { } line)
+            {
+                if (line.Length == 0 || line[0] == '#') continue;
+                int tab = line.IndexOf('\t');
+                if (tab > 0 && int.TryParse(line[..tab], out int key))
+                    map[key] = line[(tab + 1)..].Trim();
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    /// <summary>Items whose name contains <paramref name="query"/>, or the one with that key.</summary>
+    private static List<(int Key, string Name)> FindItemsByName(string query)
+    {
+        var hits = new List<(int, string)>();
+        if (int.TryParse(query, out int exact))
+        {
+            if (ItemNames.TryGetValue(exact, out string? only)) hits.Add((exact, only));
+            return hits;
+        }
+        foreach (var (key, name) in ItemNames)
+            if (name.Contains(query, StringComparison.OrdinalIgnoreCase))
+                hits.Add((key, name));
+        hits.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+        return hits;
+    }
 
     private static T? LoadEmbedded<T>(string endsWith) where T : class
     {
@@ -143,7 +191,7 @@ internal sealed class MainForm : Form
         _trayIcon = new NotifyIcon
         {
             Icon = Icon ?? SystemIcons.Application,
-            Text = "TBH Trainer",
+            Text = "KEWI_TBH",
             ContextMenuStrip = menu,
             Visible = true,   // the window has no taskbar button now, so this is the way back
         };
@@ -244,7 +292,7 @@ internal sealed class MainForm : Form
 
     private void InitializeComponent()
     {
-        Text = $"TBH Trainer v{AppInfo.Version}";
+        Text = $"KEWI_TBH v{AppInfo.Version}";
         Size = new Size(584, 920);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -332,6 +380,11 @@ internal sealed class MainForm : Form
 
         Log("Trainer ready.");
         Log("ACTK BYPASS tab: offsets per build — see README.md if a hotfix broke features.");
+
+        // Local test channel. Starts on one machine only; silent everywhere else.
+        _debug = new DebugServer(HandleDebugCommand);
+        if (_debug.Start()) Log($"Debug channel open at {DebugServer.ChannelDir}.");
+        else { _debug.Dispose(); _debug = null; }
     }
 
     private void BuildRuntimeTab(TabPage page)
@@ -409,10 +462,11 @@ internal sealed class MainForm : Form
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
 
         // Empties the bag into the stash once it fills up, so boxes keep opening.
-        // Stash page 1 is kept for soul stones only; nothing else is sorted.
+        // Materials go to the Material Stash tab when that DLC is owned; gear is only
+        // kept at level 90+ and lower gear stays in the bag.
         _chkBagToStash = new CheckBox
         {
-            Text = "Bag → stash when full (page 1 = soul stones)", Location = new Point(230, 26), AutoSize = true,
+            Text = "Bag → stash when full (materials → Material Stash, gear 90+)", Location = new Point(230, 26), AutoSize = true,
             ForeColor = TextMain, Checked = true
         };
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
@@ -608,16 +662,19 @@ internal sealed class MainForm : Form
         var titleRect = new Rectangle(tx, 4, 360, 44);
         using (var tb = new System.Drawing.Drawing2D.LinearGradientBrush(
             titleRect, AccentCyan, AccentPurp, 0f))
-            g.DrawString("DENOISER", titleFont, tb, tx, 6);
+            g.DrawString("KEWI", titleFont, tb, tx, 6);
 
-        float dw = g.MeasureString("DENOISER", titleFont).Width;
+        float dw = g.MeasureString("KEWI", titleFont).Width;
         using var subFont = new Font("Segoe UI", 11, FontStyle.Bold);
-        using (var db = new SolidBrush(TextDim))
-            g.DrawString("TRAINER", subFont, db, tx + dw - 10, 20);
+        // Carries the wordmark's gradient on, picking up where KEWI leaves off.
+        var subRect = new Rectangle((int)(tx + dw - 10), 18, 70, 22);
+        using (var db = new System.Drawing.Drawing2D.LinearGradientBrush(
+            subRect, AccentPurp, AccentCyan, 0f))
+            g.DrawString("_TBH", subFont, db, tx + dw - 10, 20);
 
         using var tagFont = new Font("Segoe UI", 8.5f);
         using (var tg = new SolidBrush(Color.FromArgb(120, 125, 142)))
-            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.2.8   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Spawn",
+            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.3.1   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Stash",
                 tagFont, tg, tx, 50);
 
         using var pen = new Pen(AccentCyan, 2);
@@ -630,6 +687,173 @@ internal sealed class MainForm : Form
     // measure: AppendText is not subject to it, so the old log was never actually truncated.)
     private const int LogTrimAt = 24000;
 
+    private DebugServer? _debug;
+
+    /// <summary>
+    /// One line in, one block of text out. Everything that touches the UI or the bridge is
+    /// marshalled onto the UI thread, because the channel runs on a background task.
+    /// </summary>
+    private string HandleDebugCommand(string request)
+    {
+        string[] parts = request.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        string cmd = parts.Length > 0 ? parts[0].ToLowerInvariant() : string.Empty;
+        string arg = parts.Length > 1 ? parts[1].Trim() : string.Empty;
+
+        switch (cmd)
+        {
+            case "ping":
+                return "pong " + AppInfo.Version;
+
+            case "log":
+            {
+                int want = int.TryParse(arg, out int n) && n > 0 ? n : 80;
+                lock (_logRing)
+                    return string.Join("\n", _logRing.Reverse().Take(want).Reverse());
+            }
+
+            case "status":
+                return RunOnUi(DescribeStatus);
+
+            case "do":
+                return RunOnUi(() => RunDebugAction(arg));
+
+            case "help":
+            default:
+                return "commands: ping | log [lines] | status | do <action> | help\n" +
+                       "actions:  attach bypass bagstash chestlog chestupgrades scanheroes " +
+                       "maxstats clearmax selfcheck herolayout invscan stashlist\n" +
+                       "          finditem <name> | spawn <key> [n] | speedwatch [secs]";
+        }
+    }
+
+    private string RunOnUi(Func<string> fn)
+    {
+        if (!InvokeRequired) return fn();
+        string result = string.Empty;
+        Invoke(() => { try { result = fn(); } catch (Exception ex) { result = "ERROR " + ex.Message; } });
+        return result;
+    }
+
+    private string DescribeStatus()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"version      {AppInfo.Version}");
+        sb.AppendLine($"build        {(_buildDetected ? _buildProfile.VersionLabel : "not detected")}");
+        sb.AppendLine($"game api     {(GameApiAllowed ? "allowed" : "off for this build")}");
+        sb.AppendLine($"bridge       {(_bridge.IsConnected ? "connected" : "not connected")}");
+        sb.AppendLine($"stash api    {(_bridge.StashResolved ? "resolved" : "not resolved")}");
+        sb.AppendLine($"matstash dlc rva 0x{_buildProfile.MatStashDlcRva:X}");
+        return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>Presses one of the trainer's own buttons. The log carries the result.</summary>
+    private string RunDebugAction(string action)
+    {
+        string[] bits = action.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        string verb = bits.Length > 0 ? bits[0].ToLowerInvariant() : string.Empty;
+        string arg = bits.Length > 1 ? bits[1].Trim() : string.Empty;
+        switch (verb)
+        {
+            case "attach":        OnAttach(this, EventArgs.Empty); return "attach requested";
+            case "bypass":        OnBypass(this, EventArgs.Empty); return "bypass requested";
+            case "bagstash":      OnBagToStashNow();      return "bag -> stash requested";
+            case "chestlog":      OnChestLog();           return "chest log requested";
+            case "chestupgrades": OnChestUpgrades();      return "chest upgrades requested";
+            case "scanheroes":    OnScanHeroes(this, EventArgs.Empty); return "hero scan requested";
+            case "maxstats":      OnMaxHeroStats(true);   return "max stats requested";
+            case "clearmax":      OnMaxHeroStats(false);  return "clear max requested";
+            case "selfcheck":     OnSelfCheck();          return "self check requested";
+            case "herolayout":    OnDumpHeroLayout();     return "hero layout dump requested";
+            case "invscan":       RunInventoryScan();     return "inventory scan requested";
+            case "matadd":
+            {
+                // Command 21: offer one stash slot to a Material Stash adder candidate.
+                // "do matadd <stash slot> [1|2]" - 1 = kbx, 2 = kby.
+                string[] a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 1 || !int.TryParse(a[0], out int mslot) || mslot < 0)
+                    return "usage: do matadd <stash slot> [1=kbx|2=kby]";
+                int which = a.Length > 1 && int.TryParse(a[1], out int w) ? w : 1;
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                // 21 = the slot is in the stash, 22 = it is in the bag.
+                bool fromBag = a.Length > 2 && a[2].Equals("bag", StringComparison.OrdinalIgnoreCase);
+                return _heroScanBridge.WriteValue(fromBag ? 22 : 21, mslot, which, timeoutMs: 30000)?.Trim()
+                       ?? "material stash adder test timed out";
+            }
+            case "finditem":
+            {
+                // Name lookup, done in the trainer against the extracted name table.
+                if (arg.Length == 0) return "usage: do finditem <name or key>";
+                var hits = FindItemsByName(arg);
+                if (hits.Count == 0) return $"no item matches \"{arg}\" ({ItemNames.Count} names loaded)";
+                var sb = new System.Text.StringBuilder();
+                foreach (var (key, name) in hits.Take(40)) sb.AppendLine($"{key}\t{name}");
+                if (hits.Count > 40) sb.AppendLine($"... {hits.Count} matches, showing 40");
+                return sb.ToString().TrimEnd();
+            }
+            case "spawn":
+            {
+                // Command 25. A spawned item is flagged by the game and cannot be sold.
+                string[] sp = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (sp.Length < 1 || !int.TryParse(sp[0], out int spawnKey) || spawnKey <= 0)
+                    return "usage: do spawn <itemKey> [count]";
+                int count = sp.Length > 1 && int.TryParse(sp[1], out int c) ? c : 1;
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(25, spawnKey, count, timeoutMs: 30000)?.Trim()
+                       ?? "spawn timed out";
+            }
+            case "speedwatch":
+            {
+                // Command 26: sample the heroes for N seconds while the speed is up.
+                // "do speedwatch <secs> [speed]". A speed given here is driven by the hook for
+                // the watch window only, so the 20x failure can be reproduced on purpose.
+                string[] sw = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                int secs = sw.Length > 0 && int.TryParse(sw[0], out int sv) && sv >= 3 ? sv : 15;
+                int speed = sw.Length > 1 && int.TryParse(sw[1], out int sp) && sp > 0 ? sp : 0;
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(26, speed, secs, timeoutMs: (secs + 25) * 1000)?.Trim()
+                       ?? "speed watch timed out";
+            }
+            case "itemsearch":
+            {
+                // Command 24: search the game's item database by name or key.
+                if (arg.Length == 0) return "usage: do itemsearch <name or key>";
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.RunQuery(24, arg)?.Trim() ?? "item search timed out";
+            }
+            case "pull":
+            {
+                // Command 23: move one stash slot into the first free bag slot.
+                if (!int.TryParse(arg, out int pslot) || pslot < 0) return "usage: do pull <stash slot>";
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(23, pslot, 0f, timeoutMs: 30000)?.Trim()
+                       ?? "pull timed out";
+            }
+            case "mattest":
+            {
+                // Command 20: move one stash slot into the Material Stash and straight back.
+                if (!int.TryParse(arg, out int slot) || slot < 0) return "usage: do mattest <stash slot>";
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(20, slot, 0f, timeoutMs: 30000)?.Trim()
+                       ?? "material stash test timed out";
+            }
+            case "stashlist":
+            {
+                // Command 19 is the hook's read-only stash listing; it has no button of its own.
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(19, 0, 0f, timeoutMs: 20000)?.Trim()
+                       ?? "stash list timed out";
+            }
+            default:              return "unknown action: " + action;
+        }
+    }
+
     private void Log(string msg)
     {
         if (_txtLog == null) return;
@@ -638,8 +862,19 @@ internal sealed class MainForm : Form
         else AppendLog(line);
     }
 
+    // The TextBox is trimmed to keep the trainer's footprint down, and its handle does not
+    // even exist until its tab is shown, so the debug channel reads this ring instead.
+    private readonly Queue<string> _logRing = new();
+    private const int LogRingLines = 600;
+
     private void AppendLog(string line)
     {
+        lock (_logRing)
+        {
+            _logRing.Enqueue(line.TrimEnd('\r', '\n'));
+            while (_logRing.Count > LogRingLines) _logRing.Dequeue();
+        }
+
         if (_txtLog.TextLength + line.Length > LogTrimAt)
         {
             string text = _txtLog.Text;
@@ -1024,8 +1259,9 @@ internal sealed class MainForm : Form
     /// running frames, which game APIs resolved, heroes and locks, boxes, stash.
     /// </summary>
     /// <summary>
-    /// Command 33 with value 2: moves everything out of the bag right now. Soul stones go to
-    /// stash page 1, everything else to page 2 and later; the toggle keeps its own state.
+    /// Command 33 with value 2: moves everything out of the bag right now. Materials go to
+    /// the Material Stash tab when the DLC is owned, gear only at level 90+, everything else
+    /// to the first free stash slot; the toggle keeps its own state.
     /// </summary>
     private void OnBagToStashNow()
     {
@@ -1040,7 +1276,7 @@ internal sealed class MainForm : Form
         _btnBagToStashNow.Enabled = false;
         try
         {
-            Log("--- Emptying the bag into the stash (page 1 = soul stones) ---");
+            Log("--- Emptying the bag into the stash (materials → Material Stash, gear 90+) ---");
             string? result = _heroScanBridge.WriteValue(33, 0, 2f, timeoutMs: 70000);
             Log(result?.Trim() ?? "ERROR: bag to stash timed out.");
             RunInventoryScan();
@@ -1439,6 +1675,7 @@ internal sealed class MainForm : Form
         }
         catch { }
         _heroScanBridge?.Dispose();
+        _debug?.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _bridge.Dispose();

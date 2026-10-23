@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal sealed class TrainerBridge : IDisposable
 {
     private const string MapName = "TBHTrainerShared";
-    private const int    MapSize = 124;
+    private const int    MapSize = 128;
     private const int    Magic   = 0x31484254; // "TBH1"
 
     private const long OffMagic        = 0x00;
@@ -39,6 +39,7 @@ internal sealed class TrainerBridge : IDisposable
     private const long OffRvaMonsterDie = 0x70;
     private const long OffRvaMonsterDamage = 0x74;
     private const long OffMaxHpOffset      = 0x78;
+    private const long OffRvaMatStashDlc   = 0x7C;
     private const long OffRvaAccGet     = 0x68;
     private const long OffRvaAccSet     = 0x6C;
 
@@ -93,6 +94,7 @@ internal sealed class TrainerBridge : IDisposable
         _view.Write(OffMaxHpOffset, profile.MaxHpOffset);
         _view.Write(OffRvaAccGet, api ? profile.AccStatusGetRva : 0);
         _view.Write(OffRvaAccSet, api ? profile.AccStatusSetRva : 0);
+        _view.Write(OffRvaMatStashDlc, api ? profile.MatStashDlcRva : 0);
         _view.Write(OffTrainerPaused, 0);   // (re)connected: resume
     }
 

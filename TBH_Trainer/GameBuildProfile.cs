@@ -75,6 +75,14 @@ internal sealed class GameBuildProfile
     /// <summary>void AccountStatus.llx(EAccountStatus, int) - writes one account upgrade value.</summary>
     public int AccStatusSetRva { get; init; }
 
+    /// <summary>
+    /// static bool xo.wb.kbv() - true when the Material Stash DLC is owned. The material stash
+    /// is the stackable-materials tab (ores, extracts) added as paid DLC; without it the game
+    /// refuses every move into ESlotType.MATERIALSTASH (EAddMaterialStashResult.NoDlc).
+    /// 0 = not derived for this build, and the hook then leaves the material stash alone.
+    /// </summary>
+    public int MatStashDlcRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -357,7 +365,66 @@ internal sealed class GameBuildProfile
         HeroStatsVerified = true,
     };
 
-    public static IReadOnlyList<GameBuildProfile> All { get; } = [V130, V128, V127, V126, V124, V1009, V1008];
+    /// <summary>
+    /// Taskbar Hero 1.3.1 (Steam build 26151704, 2026-10-23). A small patch: the class table is
+    /// the same size and no field layout moved, but every RVA shifted and the obfuscator
+    /// re-rolled names again. The RVA -> file offset delta is 0x1200 on this build, not the
+    /// 0xE00 every build up to 1.3.0 used, so it is read from the PE section table.
+    ///
+    /// Most targets were found by matching the declaring class and the method's own shape
+    /// (modifiers, return type, parameter types) against 1.3.0 - names are no help. 1.3.1 also
+    /// renamed most obfuscated methods by shifting the last letter +4 (bblq -> bblu, lae -> lai,
+    /// iuh -> iul, ...; 10,064 methods follow it), which independently confirms several picks.
+    /// Where several clones share a shape, the call-site count decides: that is noted inline.
+    ///
+    /// UnitHealthController (pp) still has max HP at +0x50 and current HP at +0x40, and Unit's
+    /// 94 fields are byte-for-byte identical to 1.3.0 including the resistance dictionary at
+    /// 0x260 - so the hero features carry over untouched.
+    /// </summary>
+    public static GameBuildProfile V131 { get; } = new()
+    {
+        VersionLabel = "1.3.1",
+        BuildId = 10301,
+        // All six prologues verified against the bytes at RVA - 0x1200.
+        ActkTargets =
+        [
+            ("ObscuredCheatingDetector.Check",       0x73D150, 0x73BF50, [0x41, 0x56, 0x48, 0x83, 0xEC, 0x20]),
+            ("ObscuredCheatingDetector.Compare",     0x73D2E0, 0x73C0E0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("ObscuredCheatingDetector.CompareExt",  0x73D3C0, 0x73C1C0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),
+            ("InjectionDetector.Check",              0x73C670, 0x73B470, [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20]),
+            ("SpeedHackDetector.Update",             0x742060, 0x740E60, [0x40, 0x56, 0x48, 0x83, 0xEC, 0x70]),
+            ("SpeedHackDetector.OnApplicationPause", 0x741FD0, 0x740DD0, [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57]),
+        ],
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0x9B2890,       // xo.vu.jzh (20 calls) - also jzd+4, the 1.3.0 name shifted
+        ItemInfoRva = 0x9B3F20,      // xo.vu.jzs - jzo+4; unused since item spawn was removed
+        SlotUidRva = 0x906CC0,       // sj.iul (30 calls) - the only method of its shape in sj
+        StashCacheRva = 0xA5C6D0,    // xo.Stash.lai (36 calls)
+        BoxCountRva = 0x9A1980,      // xo.vq.jvb (63 calls). xo.vq was renamed wholesale, so the
+                                     // name shift is no help here: the 44-call sibling is 69
+                                     // bytes to its first ret and makes one call - the same
+                                     // short forwarder shape that was the decoy on 1.3.0
+        MonsterDieRva = 0xE1BE60,    // Monster.hbd, still the only override bool (Unit)
+        MonsterDamageRva = 0xE277C0, // pl.hby, still the only override void (float, Unit)
+        MaxHpOffset = 0x50,          // class pp layout is unchanged from 1.3.0
+        SlotMoveRva = 0x901080,      // sj.itf (2 calls) - itb+4, the only method of its shape
+        AccStatusGetRva = 0xB32F00,  // AccountStatus.mnq (128 calls)
+        AccStatusSetRva = 0xB32F90,  // AccountStatus.mnr (8 calls)
+        MatStashDlcRva = 0x9CE130,   // xo.wb.kbv (19 calls; the other bool of its shape has none)
+        StashNamespace = "xo",
+        GameApiVerified = true,
+        ItemScanSupported = false,
+        HeroStatsVerified = true,
+    };
+
+    public static IReadOnlyList<GameBuildProfile> All { get; } = [V131, V130, V128, V127, V126, V124, V1009, V1008];
 
     public static GameBuildProfile? Detect(GameMemory mem)
     {

@@ -27,11 +27,11 @@ if errorlevel 1 (
 )
 
 if not exist "..\TrainerBuild" mkdir "..\TrainerBuild"
-copy /Y "..\publish\TBH Trainer.exe" "..\TrainerBuild\TBH Trainer.exe" >nul
+copy /Y "..\publish\KEWI_TBH.exe" "..\TrainerBuild\KEWI_TBH.exe" >nul
 rem A running trainer locks its own exe, so this copy fails while one is open. Reporting
 rem BUILD OK anyway leaves the previous build in TrainerBuild and it gets tested instead.
 if errorlevel 1 (
-    echo COPY FAILED - "..\TrainerBuild\TBH Trainer.exe" is locked. Close the trainer and build again.
+    echo COPY FAILED - "..\TrainerBuild\KEWI_TBH.exe" is locked. Close the trainer and build again.
     exit /b 1
 )
 rem Take the hook straight from where TBHHookuild.bat puts it. It used to be copied out of
@@ -55,5 +55,5 @@ if errorlevel 1 (
 
 echo.
 echo BUILD OK
-echo Run: ..\TrainerBuild\TBH Trainer.exe
+echo Run: ..\TrainerBuild\KEWI_TBH.exe
 endlocal

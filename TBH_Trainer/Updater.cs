@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal static class AppInfo
 {
     /// <summary>Bump together with the GitHub release tag (v&lt;Version&gt;).</summary>
-    public const string Version = "2.3.0";
+    public const string Version = "2.4.0";
 }
 
 /// <summary>
@@ -57,7 +57,7 @@ internal static class Updater
         {
             log($"Trainer is up to date (v{AppInfo.Version}).");
             if (interactive)
-                MessageBox.Show(owner, $"TBH Trainer v{AppInfo.Version} is the latest version.",
+                MessageBox.Show(owner, $"KEWI_TBH v{AppInfo.Version} is the latest version.",
                     "Check for updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -65,7 +65,7 @@ internal static class Updater
         log($"Update available: {latest.Tag} (current v{AppInfo.Version}).");
         string notes = latest.Notes.Length > 600 ? latest.Notes[..600] + " â€¦" : latest.Notes;
         if (MessageBox.Show(owner,
-                $"TBH Trainer {latest.Tag} is available (you have v{AppInfo.Version}).\n\n{notes}\n\nDownload and install now?",
+                $"KEWI_TBH {latest.Tag} is available (you have v{AppInfo.Version}).\n\n{notes}\n\nDownload and install now?",
                 "Update available", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
             return;
 
@@ -148,8 +148,11 @@ internal static class Updater
 
         string extracted = Path.Combine(staging, "files");
         ZipFile.ExtractToDirectory(zipPath, extracted);
-        if (!File.Exists(Path.Combine(extracted, "TBH Trainer.exe")))
-            throw new InvalidDataException("the release zip does not contain TBH Trainer.exe");
+        // Not matched by name: the trainer's exe was renamed once already (TBH Trainer -> KEWI_TBH)
+        // and a hardcoded name here is what makes a rename break the update path for everyone
+        // still on the old build. Any single exe in the zip is the trainer.
+        if (Directory.GetFiles(extracted, "*.exe").Length == 0)
+            throw new InvalidDataException("the release zip does not contain a trainer exe");
         return extracted;
     }
 
@@ -160,7 +163,11 @@ internal static class Updater
     private static void LaunchInstaller(string extracted)
     {
         string target = AppContext.BaseDirectory.TrimEnd('\\');
-        string exe = Path.Combine(target, "TBH Trainer.exe");
+        // Restart whatever the new zip calls itself, not whatever this build is called: an
+        // update that renames the exe would otherwise relaunch the old file it just replaced.
+        string exe = Directory.GetFiles(extracted, "*.exe") is [var only]
+            ? Path.Combine(target, Path.GetFileName(only))
+            : Environment.ProcessPath ?? Path.Combine(target, "KEWI_TBH.exe");
         string script = Path.Combine(Path.GetTempPath(), "TBHTrainerUpdate.cmd");
         int pid = Environment.ProcessId;
         File.WriteAllText(script,

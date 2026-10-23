@@ -36,7 +36,7 @@ internal static class Program
 
         MessageBox.Show(
             ex.Message + "\n\nDetails written to:\n" + log,
-            "TBH Trainer — startup error",
+            "KEWI_TBH — startup error",
             MessageBoxButtons.OK,
             MessageBoxIcon.Error);
     }

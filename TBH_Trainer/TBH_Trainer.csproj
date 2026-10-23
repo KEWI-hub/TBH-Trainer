@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>TBH_Trainer</RootNamespace>
-    <AssemblyName>TBH Trainer</AssemblyName>
+    <AssemblyName>KEWI_TBH</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <!-- Footprint: the trainer idles next to the game, so it should not keep a background GC
@@ -24,6 +24,10 @@
   <ItemGroup>
     <EmbeddedResource Include="logo.png" />
     <EmbeddedResource Include="icon.ico" />
+    <!-- itemKey -> display name, extracted once from the game's localisation bundles. The
+         item database only carries the key ItemName_<itemKey>, and resolving that at runtime
+         would mean driving Unity's async localisation API for a table that never changes. -->
+    <EmbeddedResource Include="item_names.tsv" />
   </ItemGroup>
   <!-- Ship the injected speed-hook DLL next to the trainer on every build. -->
   <ItemGroup>
