@@ -85,6 +85,8 @@ struct HeroScanState
     int32_t request;
     int32_t done;
     int32_t length;
+    // 60-67 are the trainer's own debug/test commands; they start at 60 because 20-28 are
+    // hero stats and an earlier numbering collided with them, silently breaking max stats.
     int32_t command;   // 0=scan, 1=current HP, 2=max HP, 3=attack damage, 4=attack speed, 5=both HP,
                        // 6=clear locks, 7=layout dump, 8=crit chance, 9=crit damage, 10=cooldown reduction,
                        // 11=armor, 12=one-hit kill toggle, 13=god mode toggle,
@@ -2398,13 +2400,16 @@ static const int32_t kSlotMaterialStash = 6; // ESlotType.MATERIALSTASH (paid DL
 // Defined with the bag -> stash code below; the read-only scan reports it too.
 static bool HasMaterialStashDlc();
 
-// God mode's and one-hit kill's damage detours, installed further down; the speed watch
-// reports on them.
+// God mode's damage detour, installed further down; the speed watch reports on it.
+//
+// One-hit kill deliberately does NOT work this way. Making the hero's own hit lethal was tried
+// on 2026-10-24 and measured against the game's own log: with it on, the stage logged 4
+// "[System.Stage] StageCount Error" every five minutes and eventually hung; with it off, none.
+// ApplyOneHitKill already keeps monsters at 1 HP from the worker thread, and two mechanisms
+// killing the same monster is more than the wave counter can take.
 typedef void (*HeroDamageFn)(void* self, float damage, void* attacker, const void* method);
 static HeroDamageFn g_origHeroDamage;
-static HeroDamageFn g_origMonsterDamage;
 static volatile LONG g_heroHitsBlocked;
-static volatile LONG g_monsterHitsAmplified;
 static int32_t MatStashCount();
 static bool MatStashAdd(uint64_t uid, int32_t key, int32_t quantity, int32_t* result);
 
@@ -2644,7 +2649,7 @@ static const char* ItemTypeName(int32_t t)
                  case 2: return "GEAR";     case 3: return "NONE"; default: return "?"; }
 }
 
-// Command 24: search the item database. The query is written into the scan text buffer by the
+// Command 64: search the item database. The query is written into the scan text buffer by the
 // trainer before the request is raised; an all-digits query matches the item key exactly.
 static void RunItemSearch()
 {
@@ -3283,7 +3288,7 @@ static int32_t BagFreeSlots()
 }
 
 
-// Command 20: move one ordinary-stash slot into the Material Stash and put it back, to prove
+// Command 60: move one ordinary-stash slot into the Material Stash and put it back, to prove
 // the tab accepts a move at all. Writes what happened at each step, so a half-finished test is
 // visible rather than silent. This is a test command: nothing in the trainer's normal run
 // calls it.
@@ -3573,7 +3578,7 @@ static void RunStashPull(int32_t stashIndex)
 
 
 // ---------------------------------------------------------------------------------
-// Command 25: spawn one item. xo.vu.jzh(int itemKey, ulong uid, EItemGetSourceType source,
+// Command 65: spawn one item. xo.vu.jzh(int itemKey, ulong uid, EItemGetSourceType source,
 // int quantity, bool flag) returns an AddItemResult struct - ItemType, AddResult, ItemKey,
 // UniqueId, QuantityBefore, AddedQuantity - so the call says what it actually did.
 //
@@ -3670,7 +3675,7 @@ static void RunSpawnItem(int32_t itemKey, int32_t quantity)
 }
 
 // ---------------------------------------------------------------------------------
-// Command 26: watch the heroes while the speed is up.
+// Command 66: watch the heroes while the speed is up.
 //
 // Heroes die at 20x with god mode on and nothing so far explains it. God mode writes max HP
 // and current HP every frame, so either the writes stop landing, or something takes the hero
@@ -3793,15 +3798,14 @@ static void SpeedWatchTick()
     pos = ScanAppend(text, cap, pos,
         "speed       %s, requested %.2fx%s\r\n"
         "god mode    %s (%ld hits blocked)\r\n"
-        "one-hit     %s (%ld hits made lethal)\r\n"
+        "one-hit     %s\r\n"
         "frames      %d over %.1fs (%.1f fps, worst frame %.0f ms)\r\n",
         g_shared && g_shared->speedEnabled ? "ON" : "off",
         g_sw.watchScale > 0.0f ? g_sw.watchScale : (g_shared ? g_shared->timeScale : 0.0f),
         g_sw.watchScale > 0.0f ? " (set by this watch, past the 5x cap)" : "",
         g_godMode ? (g_origHeroDamage ? "ON" : "ON (HP writes only)") : "off",
         g_heroHitsBlocked,
-        g_oneHitKill ? (g_origMonsterDamage ? "ON" : "ON (1 HP writes only)") : "off",
-        g_monsterHitsAmplified,
+        g_oneHitKill ? "ON" : "off",
         g_sw.frames, g_sw.totalMs / 1000.0f,
         g_sw.totalMs > 0 ? g_sw.frames * 1000.0f / g_sw.totalMs : 0.0f,
         g_sw.worstFrameMs);
@@ -4076,9 +4080,21 @@ static void HookedSimUpdate(void* self, const void* method)
 // ---------------------------------------------------------------------------------
 static bool g_heroDamageTried = false;
 
+// The health controller holds its Unit at +0x30, and Unit.b_isHero is at +0x100.
+static bool HealthBelongsToHero(void* health)
+{
+    if (!health) return false;
+    void* unit = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(health) + 0x30);
+    if (!unit) return false;
+    return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(unit) + 0x100) != 0;
+}
+
 static void HookedHeroDamage(void* self, float damage, void* attacker, const void* method)
 {
-    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused))
+    // Only one of ours. pl overrides hby and calls this base implementation, so without this
+    // check god mode also made every monster immune and the heroes could not kill anything.
+    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
+        HealthBelongsToHero(self))
     {
         InterlockedIncrement(&g_heroHitsBlocked);
         return;                      // the hero simply does not take the hit
@@ -4086,29 +4102,8 @@ static void HookedHeroDamage(void* self, float damage, void* attacker, const voi
     if (g_origHeroDamage) g_origHeroDamage(self, damage, attacker, method);
 }
 
-// Is this Unit one of ours? Unit.b_isHero sits at +0x100 on every build so far, and the hero
-// layout dump prints it, so a wrong answer here is visible rather than silent.
-static bool UnitIsHero(void* unit)
-{
-    if (!unit) return false;
-    return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(unit) + 0x100) != 0;
-}
-
-static const float kOneHitDamage = 1.0e9f;
-
-static void HookedMonsterDamage(void* self, float damage, void* attacker, const void* method)
-{
-    if (g_oneHitKill && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
-        UnitIsHero(attacker))
-    {
-        InterlockedIncrement(&g_monsterHitsAmplified);
-        damage = kOneHitDamage;     // the game's own kill path still runs, so drops still drop
-    }
-    if (g_origMonsterDamage) g_origMonsterDamage(self, damage, attacker, method);
-}
-
-// Shared by both damage detours: verify the prologue, build a trampoline within reach, then
-// swap the first 8 bytes in one aligned store so the main thread never runs half a jump.
+// Verify the prologue, build a trampoline within reach, then swap the first 8 bytes in one
+// aligned store so the main thread never runs half a jump.
 static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* original)
 {
     if (*original) return true;
@@ -4157,17 +4152,6 @@ static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* or
     VirtualProtect(target, 8, old, &old);
     FlushInstructionCache(GetCurrentProcess(), target, 8);
     return true;
-}
-
-static bool InstallMonsterDamageHook()
-{
-    static bool tried = false;
-    if (g_origMonsterDamage) return true;
-    if (tried) return false;
-    tried = true;
-    return InstallDamageDetour(g_shared ? g_shared->rvaMonsterDamage : 0,
-                               reinterpret_cast<void*>(&HookedMonsterDamage),
-                               &g_origMonsterDamage);
 }
 
 static bool InstallHeroDamageHook()
@@ -4790,16 +4774,10 @@ static void RunHeroCommand()
         // the answer says whether it took: without it, heroes are only as safe as the next
         // frame boundary, which at 20x can be ten seconds of game time away.
         bool godOn = g_heroScan->command == 13 && on;
-        bool killOn = g_heroScan->command == 12 && on;
-        bool hooked = godOn  ? InstallHeroDamageHook()
-                    : killOn ? InstallMonsterDamageHook()
-                             : false;
+        bool hooked = godOn ? InstallHeroDamageHook() : false;
         const char* note =
-            godOn  ? (hooked ? " - damage blocked at the source"
-                             : " - WARNING: damage hook did not install, HP writes only")
-          : killOn ? (hooked ? " - the hero's own hit is made lethal"
-                             : " - WARNING: damage hook did not install, 1 HP writes only")
-                   : "";
+            godOn ? (hooked ? " - damage blocked at the source"
+                            : " - WARNING: damage hook did not install, HP writes only") : "";
         size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: %s %s%s\r\n",
             g_heroScan->command == 12 ? "One-hit kill" : "God mode", on ? "ON" : "OFF", note);
         g_heroScan->length = static_cast<int32_t>(n);
@@ -5478,7 +5456,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
                 RunSelfCheck();
             }
-            else if (g_heroScan->command == 25 || g_heroScan->command == 26)
+            else if (g_heroScan->command == 65 || g_heroScan->command == 66)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5490,7 +5468,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                         "ERROR: could not install the per-frame hook on this build.\r\n"));
                     g_heroScan->done = -1;
                 }
-                else if (g_heroScan->command == 25)
+                else if (g_heroScan->command == 65)
                 {
                     InterlockedExchange(&g_spawnDone, 0);
                     InterlockedExchange(&g_spawnCount, static_cast<LONG>(g_heroScan->value));
@@ -5524,7 +5502,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     if (!g_speedWatchDone) g_speedWatchEnd = 0;
                 }
             }
-            else if (g_heroScan->command == 27)
+            else if (g_heroScan->command == 67)
             {
                 // Re-arm the Material Stash probe. Costs one duplicated item if the game still
                 // adds without consuming, which is why it is a deliberate command.
@@ -5537,13 +5515,13 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     "and the tab switches itself off again.\r\n"));
                 g_heroScan->done = 1;
             }
-            else if (g_heroScan->command == 24)
+            else if (g_heroScan->command == 64)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
                 RunItemSearch();        // reads its query out of the text buffer first
             }
-            else if (g_heroScan->command == 23)
+            else if (g_heroScan->command == 63)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5558,7 +5536,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     if (!g_matPullDone) InterlockedExchange(&g_matPullSlot, -1);
                 }
             }
-            else if (g_heroScan->command == 21 || g_heroScan->command == 22)
+            else if (g_heroScan->command == 61 || g_heroScan->command == 62)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5575,7 +5553,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     InterlockedExchange(&g_matAddDone, 0);
                     InterlockedExchange(&g_matAddWhich, static_cast<LONG>(g_heroScan->value));
                     InterlockedExchange(&g_matAddSrc,
-                                        g_heroScan->command == 22 ? kSlotInventory : kSlotStash);
+                                        g_heroScan->command == 62 ? kSlotInventory : kSlotStash);
                     InterlockedExchange(&g_matAddSlot, g_heroScan->heroIndex);
                     for (int waited = 0; !g_matAddDone && waited < 20000; waited += 50) Sleep(50);
                     if (!g_matAddDone)
@@ -5589,7 +5567,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     else g_heroScan->done = g_matAddDone;
                 }
             }
-            else if (g_heroScan->command == 20)
+            else if (g_heroScan->command == 60)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;

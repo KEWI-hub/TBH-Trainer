@@ -767,7 +767,7 @@ internal sealed class MainForm : Form
             case "invscan":       RunInventoryScan();     return "inventory scan requested";
             case "matadd":
             {
-                // Command 21: offer one stash slot to a Material Stash adder candidate.
+                // Command 61: offer one stash slot to a Material Stash adder candidate.
                 // "do matadd <stash slot> [1|2]" - 1 = kbx, 2 = kby.
                 string[] a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (a.Length < 1 || !int.TryParse(a[0], out int mslot) || mslot < 0)
@@ -775,9 +775,9 @@ internal sealed class MainForm : Form
                 int which = a.Length > 1 && int.TryParse(a[1], out int w) ? w : 1;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                // 21 = the slot is in the stash, 22 = it is in the bag.
+                // 61 = the slot is in the stash, 62 = it is in the bag.
                 bool fromBag = a.Length > 2 && a[2].Equals("bag", StringComparison.OrdinalIgnoreCase);
-                return _heroScanBridge.WriteValue(fromBag ? 22 : 21, mslot, which, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(fromBag ? 62 : 61, mslot, which, timeoutMs: 30000)?.Trim()
                        ?? "material stash adder test timed out";
             }
             case "finditem":
@@ -800,12 +800,12 @@ internal sealed class MainForm : Form
                 int count = sp.Length > 1 && int.TryParse(sp[1], out int c) ? c : 1;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(25, spawnKey, count, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(65, spawnKey, count, timeoutMs: 30000)?.Trim()
                        ?? "spawn timed out";
             }
             case "speedwatch":
             {
-                // Command 26: sample the heroes for N seconds while the speed is up.
+                // Command 66: sample the heroes for N seconds while the speed is up.
                 // "do speedwatch <secs> [speed]". A speed given here is driven by the hook for
                 // the watch window only, so the 20x failure can be reproduced on purpose.
                 string[] sw = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -813,33 +813,45 @@ internal sealed class MainForm : Form
                 int speed = sw.Length > 1 && int.TryParse(sw[1], out int sp) && sp > 0 ? sp : 0;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(26, speed, secs, timeoutMs: (secs + 25) * 1000)?.Trim()
+                return _heroScanBridge.WriteValue(66, speed, secs, timeoutMs: (secs + 25) * 1000)?.Trim()
                        ?? "speed watch timed out";
             }
             case "itemsearch":
             {
-                // Command 24: search the game's item database by name or key.
+                // Command 64: search the game's item database by name or key.
                 if (arg.Length == 0) return "usage: do itemsearch <name or key>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.RunQuery(24, arg)?.Trim() ?? "item search timed out";
+                return _heroScanBridge.RunQuery(64, arg)?.Trim() ?? "item search timed out";
+            }
+            case "onehit":
+            case "godmode":
+            {
+                // Commands 12 and 13. Needed to tell whether a symptom belongs to a feature:
+                // turning one off and watching is the only honest way to attribute it.
+                bool want = !arg.Equals("off", StringComparison.OrdinalIgnoreCase);
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                int cmd = verb == "onehit" ? 12 : 13;
+                return _heroScanBridge.WriteValue(cmd, 0, want ? 1f : 0f, timeoutMs: 15000)?.Trim()
+                       ?? "toggle timed out";
             }
             case "pull":
             {
-                // Command 23: move one stash slot into the first free bag slot.
+                // Command 63: move one stash slot into the first free bag slot.
                 if (!int.TryParse(arg, out int pslot) || pslot < 0) return "usage: do pull <stash slot>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(23, pslot, 0f, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(63, pslot, 0f, timeoutMs: 30000)?.Trim()
                        ?? "pull timed out";
             }
             case "mattest":
             {
-                // Command 20: move one stash slot into the Material Stash and straight back.
+                // Command 60: move one stash slot into the Material Stash and straight back.
                 if (!int.TryParse(arg, out int slot) || slot < 0) return "usage: do mattest <stash slot>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(20, slot, 0f, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(60, slot, 0f, timeoutMs: 30000)?.Trim()
                        ?? "material stash test timed out";
             }
             case "stashlist":
@@ -1360,7 +1372,7 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// Command 24: sets every hero stat in the list to its maximum stable value on all
+    /// Command 64: sets every hero stat in the list to its maximum stable value on all
     /// three hero slots and keeps it locked (the hook re-applies it every ~0.2s, so heroes
     /// that spawn or revive later get it too). <paramref name="on"/> false releases them.
     /// </summary>
