@@ -53,14 +53,16 @@ struct SharedState
     int32_t rvaMonsterDamage;// 0x74  void pl.gxf(float damage, Unit attacker) -> the hero's own damage path
     int32_t offMaxHp;        // 0x78  max-HP field on the health controller (0x4C <=1.2.8, 0x50 on 1.3.0)
     int32_t rvaMatStashDlc;  // 0x7C  bool xo.wb.kbv() -> is the Material Stash DLC owned?
+    int32_t rvaHeroDamage;   // 0x80  void pp.hby(float, Unit) -> the hero health controller's
+                             //       damage entry, detoured by god mode
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedState) == 128, "SharedState size mismatch");
+static_assert(sizeof(SharedState) == 132, "SharedState size mismatch");
 
 static const wchar_t* kMapName = L"TBHTrainerShared";
 static const int32_t  kMagic   = 0x31484254;
-static const int      kMapSize = 128;
+static const int      kMapSize = 132;
 
 // Item scan report (trainer ItemScanBridge.cs)
 #pragma pack(push, 1)
@@ -2395,6 +2397,14 @@ static const int32_t kSlotMaterialStash = 6; // ESlotType.MATERIALSTASH (paid DL
 
 // Defined with the bag -> stash code below; the read-only scan reports it too.
 static bool HasMaterialStashDlc();
+
+// God mode's and one-hit kill's damage detours, installed further down; the speed watch
+// reports on them.
+typedef void (*HeroDamageFn)(void* self, float damage, void* attacker, const void* method);
+static HeroDamageFn g_origHeroDamage;
+static HeroDamageFn g_origMonsterDamage;
+static volatile LONG g_heroHitsBlocked;
+static volatile LONG g_monsterHitsAmplified;
 static int32_t MatStashCount();
 static bool MatStashAdd(uint64_t uid, int32_t key, int32_t quantity, int32_t* result);
 
@@ -3675,12 +3685,21 @@ static float g_speedWatchRestore = 1.0f;
 struct SpeedWatch
 {
     int32_t frames, samples;
-    int32_t heroesSeen, minAlive, maxAlive;
+    int32_t heroesSeen, minHeroesSeen, minAlive, maxAlive;
     float   lowestHp, lowestRatio;
     int32_t deathsSeen, framesWithZeroHp, framesGodModeMissing;
     float   worstFrameMs, totalMs, watchScale;
-    float   prevHp[8];
     ULONGLONG lastTick;
+
+    // Heroes tracked by object pointer: the unit list reorders and shrinks, so an index is not
+    // the same hero from one frame to the next.
+    void*   known[8];
+    float   knownHp[8];
+    int32_t knownCount;
+
+    // The first handful of interesting moments, written out rather than counted.
+    char    events[6][160];
+    int32_t eventCount;
 };
 static SpeedWatch g_sw;
 
@@ -3701,15 +3720,39 @@ static void SpeedWatchTick()
     int32_t alive = 0, idx = 0;
     float frameLowHp = -1.0f;
     bool sawZero = false, godMissing = false;
-    ForEachUnitHealth(1, [&](void*, uint8_t* hp)
+    ForEachUnitHealth(1, [&](void* unit, uint8_t* hp)
     {
         float cur = *reinterpret_cast<float*>(hp + 0x40);
         float max = *reinterpret_cast<float*>(hp + MaxHpOffset());
-        if (idx < 8)
+
+        int32_t slot = -1;
+        for (int32_t k = 0; k < g_sw.knownCount; ++k)
+            if (g_sw.known[k] == unit) { slot = k; break; }
+
+        bool isNew = slot < 0;
+        if (isNew && g_sw.knownCount < 8)
         {
-            // A hero that was alive last frame and is not now died inside this frame.
-            if (g_sw.prevHp[idx] > 0.0f && cur <= 0.0f) ++g_sw.deathsSeen;
-            g_sw.prevHp[idx] = cur;
+            slot = g_sw.knownCount++;
+            g_sw.known[slot] = unit;
+            g_sw.knownHp[slot] = cur;
+        }
+
+        auto note = [&](const char* what)
+        {
+            if (g_sw.eventCount >= 6) return;
+            sprintf_s(g_sw.events[g_sw.eventCount], sizeof(g_sw.events[0]),
+                      "  t+%.1fs frame %d: %s - hero %p hp=%.0f max=%.0f",
+                      g_sw.totalMs / 1000.0f, g_sw.frames, what, unit, cur, max);
+            ++g_sw.eventCount;
+        };
+
+        if (isNew && g_sw.frames > 2) note("a hero appeared on the field");
+        if (max < kGodModeHp)        note("max HP is NOT ours");
+        if (slot >= 0)
+        {
+            if (g_sw.knownHp[slot] > 0.0f && cur <= 0.0f) { ++g_sw.deathsSeen; note("HP reached 0"); }
+            else if (cur < g_sw.knownHp[slot] - 1.0f && cur < kGodModeHp) note("HP fell");
+            g_sw.knownHp[slot] = cur;
         }
         ++idx;
         if (cur > 0.0f) ++alive; else sawZero = true;
@@ -3726,6 +3769,7 @@ static void SpeedWatchTick()
     {
         ++g_sw.samples;
         g_sw.heroesSeen = idx;
+        if (g_sw.minHeroesSeen < 0 || idx < g_sw.minHeroesSeen) g_sw.minHeroesSeen = idx;
         if (g_sw.minAlive < 0 || alive < g_sw.minAlive) g_sw.minAlive = alive;
         if (alive > g_sw.maxAlive) g_sw.maxAlive = alive;
         if (frameLowHp >= 0.0f && (g_sw.lowestHp < 0.0f || frameLowHp < g_sw.lowestHp))
@@ -3748,12 +3792,16 @@ static void SpeedWatchTick()
     size_t pos = ScanAppend(text, cap, 0, "=== speed watch ===\r\n");
     pos = ScanAppend(text, cap, pos,
         "speed       %s, requested %.2fx%s\r\n"
-        "god mode    %s;  one-hit kill %s\r\n"
+        "god mode    %s (%ld hits blocked)\r\n"
+        "one-hit     %s (%ld hits made lethal)\r\n"
         "frames      %d over %.1fs (%.1f fps, worst frame %.0f ms)\r\n",
         g_shared && g_shared->speedEnabled ? "ON" : "off",
         g_sw.watchScale > 0.0f ? g_sw.watchScale : (g_shared ? g_shared->timeScale : 0.0f),
         g_sw.watchScale > 0.0f ? " (set by this watch, past the 5x cap)" : "",
-        g_godMode ? "ON" : "off", g_oneHitKill ? "ON" : "off",
+        g_godMode ? (g_origHeroDamage ? "ON" : "ON (HP writes only)") : "off",
+        g_heroHitsBlocked,
+        g_oneHitKill ? (g_origMonsterDamage ? "ON" : "ON (1 HP writes only)") : "off",
+        g_monsterHitsAmplified,
         g_sw.frames, g_sw.totalMs / 1000.0f,
         g_sw.totalMs > 0 ? g_sw.frames * 1000.0f / g_sw.totalMs : 0.0f,
         g_sw.worstFrameMs);
@@ -3766,12 +3814,13 @@ static void SpeedWatchTick()
     else
     {
         pos = ScanAppend(text, cap, pos,
-            "heroes      %d on the field; alive ranged %d..%d\r\n"
+            "heroes      %d on the field (fewest seen %d); alive ranged %d..%d\r\n"
             "lowest HP   %.0f  (lowest fraction of max %.4f)\r\n"
             "deaths      %d seen\r\n"
             "frames with a hero at 0 HP            %d of %d\r\n"
             "frames where max HP was NOT 2e9       %d of %d\r\n",
-            g_sw.heroesSeen, g_sw.minAlive < 0 ? 0 : g_sw.minAlive, g_sw.maxAlive,
+            g_sw.heroesSeen, g_sw.minHeroesSeen < 0 ? 0 : g_sw.minHeroesSeen,
+            g_sw.minAlive < 0 ? 0 : g_sw.minAlive, g_sw.maxAlive,
             g_sw.lowestHp, g_sw.lowestRatio,
             g_sw.deathsSeen,
             g_sw.framesWithZeroHp, g_sw.samples,
@@ -3782,12 +3831,26 @@ static void SpeedWatchTick()
                 "\r\nREAD: heroes died while max HP was 2e9 the whole time, so god mode was\r\n"
                 "landing and something still took them from full to dead between two frames -\r\n"
                 "a kill that does not go through the HP field this hook writes.\r\n");
+        else if (g_sw.framesGodModeMissing > 0 && g_origHeroDamage)
+            pos = ScanAppend(text, cap, pos,
+                "\r\nREAD: the game reset the heroes to their base HP on some frames. That is a\r\n"
+                "stage transition and it is expected. Nobody was hurt by it, because damage is\r\n"
+                "blocked at the source and no longer depends on winning a race with the HP\r\n"
+                "write at the next frame boundary.\r\n");
         else if (g_sw.framesGodModeMissing > 0)
             pos = ScanAppend(text, cap, pos,
-                "\r\nREAD: max HP was not 2e9 on some frames, so the god-mode write is being\r\n"
-                "undone or missing heroes. That is the thing to chase first.\r\n");
+                "\r\nREAD: max HP was not 2e9 on some frames and damage is NOT blocked at the\r\n"
+                "source, so the heroes are only as safe as the next frame boundary - at 20x\r\n"
+                "that can be seconds of game time away. Toggle god mode to install the hook.\r\n");
         else
             pos = ScanAppend(text, cap, pos, "\r\nREAD: nothing went wrong during this window.\r\n");
+
+        if (g_sw.eventCount > 0)
+        {
+            pos = ScanAppend(text, cap, pos, "\r\nwhat actually happened:\r\n");
+            for (int32_t e = 0; e < g_sw.eventCount; ++e)
+                pos = ScanAppend(text, cap, pos, "%s\r\n", g_sw.events[e]);
+        }
     }
 
     g_heroScan->length = static_cast<int32_t>(pos);
@@ -3988,11 +4051,136 @@ static void HookedSimUpdate(void* self, const void* method)
     if (g_autoBagMove && !g_shuttingDown && !paused) BagMoveTick();
     if (!g_shuttingDown && !paused) TestJobTick();
     g_origSimUpdate(self, method);
+
+    // Again, after the game's own update. A hero that spawns or revives inside that call had
+    // its natural HP until the next frame, and at high speed the next frame can be hundreds of
+    // milliseconds away - long enough, in game time, for it to be killed before god mode ever
+    // touched it. Writing on both sides of the update closes that half of the gap.
+    if (g_godMode && !g_shuttingDown && !paused) ApplyGodModeAllHeroes();
 }
 
 // Per-frame main-thread hook. Detours InputManager.Update (always active) and falls back to
 // SlotInteractionManager.Update, which only runs while that UI is active. The prologue must
 // be exactly "push rbx; sub rsp,20h" (40 53 48 83 EC 20), otherwise nothing is patched.
+
+// ---------------------------------------------------------------------------------
+// God mode, the reliable way: swallow the damage rather than out-write it.
+//
+// pp.hby(float damage, Unit attacker) is where a hero's health controller takes a hit. The
+// monster controller (pl) overrides it at its own address, so patching this one never touches
+// monsters and one-hit kill keeps working.
+//
+// This matters because the game resets the heroes to their base HP during its own update and
+// then keeps simulating; at 20x a single frame can carry ten seconds of game time, so there is
+// no frame boundary at which a HP write could have saved them.
+// ---------------------------------------------------------------------------------
+static bool g_heroDamageTried = false;
+
+static void HookedHeroDamage(void* self, float damage, void* attacker, const void* method)
+{
+    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused))
+    {
+        InterlockedIncrement(&g_heroHitsBlocked);
+        return;                      // the hero simply does not take the hit
+    }
+    if (g_origHeroDamage) g_origHeroDamage(self, damage, attacker, method);
+}
+
+// Is this Unit one of ours? Unit.b_isHero sits at +0x100 on every build so far, and the hero
+// layout dump prints it, so a wrong answer here is visible rather than silent.
+static bool UnitIsHero(void* unit)
+{
+    if (!unit) return false;
+    return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(unit) + 0x100) != 0;
+}
+
+static const float kOneHitDamage = 1.0e9f;
+
+static void HookedMonsterDamage(void* self, float damage, void* attacker, const void* method)
+{
+    if (g_oneHitKill && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
+        UnitIsHero(attacker))
+    {
+        InterlockedIncrement(&g_monsterHitsAmplified);
+        damage = kOneHitDamage;     // the game's own kill path still runs, so drops still drop
+    }
+    if (g_origMonsterDamage) g_origMonsterDamage(self, damage, attacker, method);
+}
+
+// Shared by both damage detours: verify the prologue, build a trampoline within reach, then
+// swap the first 8 bytes in one aligned store so the main thread never runs half a jump.
+static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* original)
+{
+    if (*original) return true;
+    if (rva <= 0) return false;
+    void* method = FindMethodByRva(static_cast<uintptr_t>(rva), 2, nullptr);
+    uint8_t* target = static_cast<uint8_t*>(MethodPointer(method));
+    if (!target) return false;
+
+    // "mov [rsp+8],rbx; push rdi; sub rsp,50h" - refuse to patch anything else.
+    static const uint8_t kPrologue[10] =
+        { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x50 };
+    if (memcmp(target, kPrologue, sizeof(kPrologue)) != 0) return false;
+    if ((reinterpret_cast<uintptr_t>(target) & 7) != 0) return false;
+
+    uint8_t* stub = nullptr;
+    uintptr_t base = reinterpret_cast<uintptr_t>(target) & ~static_cast<uintptr_t>(0xFFFF);
+    for (uintptr_t delta = 0x10000; delta < 0x70000000 && !stub; delta += 0x10000)
+        for (int dir = -1; dir <= 1 && !stub; dir += 2)
+            stub = static_cast<uint8_t*>(VirtualAlloc(
+                reinterpret_cast<void*>(dir < 0 ? base - delta : base + delta), 0x1000,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!stub) return false;
+
+    auto absJmp = [](uint8_t* at, const void* dest)
+    {
+        at[0] = 0xFF; at[1] = 0x25; memset(at + 2, 0, 4);
+        void* d = const_cast<void*>(dest);
+        memcpy(at + 6, &d, 8);
+    };
+    absJmp(stub, replacement);
+    uint8_t* tramp = stub + 32;
+    memcpy(tramp, kPrologue, sizeof(kPrologue));
+    absJmp(tramp + sizeof(kPrologue), target + sizeof(kPrologue));
+
+    DWORD old = 0;
+    if (!VirtualProtect(target, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    *original = reinterpret_cast<HeroDamageFn>(tramp);
+    // Bytes 8 and 9 of the prologue are left as they are: the jump at byte 0 means nothing
+    // reaches them again.
+    uint8_t patch[8] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90 };
+    int32_t rel = static_cast<int32_t>(stub - (target + 5));
+    memcpy(patch + 1, &rel, 4);
+    int64_t value = 0;
+    memcpy(&value, patch, 8);
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(target), value);
+    VirtualProtect(target, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, 8);
+    return true;
+}
+
+static bool InstallMonsterDamageHook()
+{
+    static bool tried = false;
+    if (g_origMonsterDamage) return true;
+    if (tried) return false;
+    tried = true;
+    return InstallDamageDetour(g_shared ? g_shared->rvaMonsterDamage : 0,
+                               reinterpret_cast<void*>(&HookedMonsterDamage),
+                               &g_origMonsterDamage);
+}
+
+static bool InstallHeroDamageHook()
+{
+    static bool tried = false;
+    if (g_origHeroDamage) return true;
+    if (tried) return false;
+    tried = true;
+    return InstallDamageDetour(g_shared ? g_shared->rvaHeroDamage : 0,
+                               reinterpret_cast<void*>(&HookedHeroDamage),
+                               &g_origHeroDamage);
+}
+
 static bool InstallSimUpdateHook()
 {
     if (g_origSimUpdate) return true;
@@ -4598,8 +4786,22 @@ static void RunHeroCommand()
     {
         bool on = g_heroScan->value != 0.0f;
         if (g_heroScan->command == 12) g_oneHitKill = on; else g_godMode = on;
-        size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: %s %s\r\n",
-            g_heroScan->command == 12 ? "One-hit kill" : "God mode", on ? "ON" : "OFF");
+        // God mode swallows the damage instead of out-writing HP, so it is installed here and
+        // the answer says whether it took: without it, heroes are only as safe as the next
+        // frame boundary, which at 20x can be ten seconds of game time away.
+        bool godOn = g_heroScan->command == 13 && on;
+        bool killOn = g_heroScan->command == 12 && on;
+        bool hooked = godOn  ? InstallHeroDamageHook()
+                    : killOn ? InstallMonsterDamageHook()
+                             : false;
+        const char* note =
+            godOn  ? (hooked ? " - damage blocked at the source"
+                             : " - WARNING: damage hook did not install, HP writes only")
+          : killOn ? (hooked ? " - the hero's own hit is made lethal"
+                             : " - WARNING: damage hook did not install, 1 HP writes only")
+                   : "";
+        size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: %s %s%s\r\n",
+            g_heroScan->command == 12 ? "One-hit kill" : "God mode", on ? "ON" : "OFF", note);
         g_heroScan->length = static_cast<int32_t>(n);
         g_heroScan->done = 1;
         return;
@@ -5307,6 +5509,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                                 ? static_cast<float>(g_heroScan->heroIndex) : 0.0f;
                     if (scale > 50.0f) scale = 50.0f;
                     g_sw = {};
+                    g_sw.minHeroesSeen = -1;
                     g_sw.watchScale = scale;
                     g_speedWatchScale = scale;
                     g_speedWatchRestore = (g_shared && g_shared->speedEnabled)

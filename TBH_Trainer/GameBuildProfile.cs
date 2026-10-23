@@ -83,6 +83,14 @@ internal sealed class GameBuildProfile
     /// </summary>
     public int MatStashDlcRva { get; init; }
 
+    /// <summary>
+    /// void pp.hby(float damage, Unit attacker) - the hero health controller's damage entry.
+    /// God mode detours this so a hero never takes the hit, instead of writing HP back every
+    /// frame and losing the race whenever the game resets the heroes mid-update.
+    /// Monsters override it in pl at a different address, so one-hit kill is unaffected.
+    /// </summary>
+    public int HeroDamageRva { get; init; }
+
     /// <summary>Inventory scan through the slot API (1.2.6+), replaces the legacy item scan.</summary>
     public bool InventoryScanSupported => SlotUidRva > 0;
 
@@ -418,6 +426,7 @@ internal sealed class GameBuildProfile
         AccStatusGetRva = 0xB32F00,  // AccountStatus.mnq (128 calls)
         AccStatusSetRva = 0xB32F90,  // AccountStatus.mnr (8 calls)
         MatStashDlcRva = 0x9CE130,   // xo.wb.kbv (19 calls; the other bool of its shape has none)
+        HeroDamageRva = 0xE287D0,    // pp.hby - prologue verified before it is patched
         StashNamespace = "xo",
         GameApiVerified = true,
         ItemScanSupported = false,
