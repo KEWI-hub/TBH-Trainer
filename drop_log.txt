@@ -1,0 +1,38 @@
+﻿# KEWI_TBH drop log - started 2026-10-24 20:04:02
+# chests per 1000 kills is the number that matters; raw counts only say how long it ran.
+#
+time     mins        kills  heroKills   chests   per1000  breakdown
+20:04:11 0               0          0        0         0  Plague normal 0, Plague stage boss 0
+20:05:01 235        439231     433169        0         0  
+20:06:20 2            1594        975        0         0  Plague normal 0, Plague stage boss 0
+20:07:06 237        440698     433866        0         0  
+20:08:29 4            3171       1574        2      0.63  Plague normal 1, Plague stage boss 1
+20:09:11 240        442212     434556        0         0  
+20:10:38 7            4713       2340        2      0.42  Plague normal 1, Plague stage boss 1
+20:11:16 242        443823     435487        0         0  
+20:12:48 9            6539       3747        4      0.61  Plague normal 2, Plague stage boss 2
+20:13:21 244        445555     436806        0         0  
+20:14:57 11           8078       4525        4       0.5  Plague normal 2, Plague stage boss 2
+20:15:26 246        446991     437399        0         0  
+20:17:06 13           9516       5141        5      0.53  Plague normal 3, Plague stage boss 2
+20:17:31 248        448392     438050        0         0  
+20:19:15 15          11103       6045        7      0.63  Plague normal 4, Plague stage boss 3
+20:19:36 250        449901     438795        0         0  
+20:21:24 17          12537       6420        7      0.56  Plague normal 4, Plague stage boss 3
+20:21:41 252        451295     439189        0         0  
+20:23:33 20          14180       7234        8      0.56  Plague normal 5, Plague stage boss 3
+20:23:46 254        452882     440015        0         0  
+20:25:43 22          15767       7880        9      0.57  Plague normal 5, Plague stage boss 4
+20:25:51 256        454445     440699        0         0  
+20:27:52 24          17450       8890       10      0.57  Plague normal 6, Plague stage boss 4
+20:27:56 258        456056     441656        0         0  
+20:30:01 260        457643     442560        0         0  
+20:30:01 26          19110       9843       10      0.52  Plague normal 6, Plague stage boss 4
+20:32:06 262        459152     443255        0         0  
+20:32:11 28          20619      10538       12      0.58  Plague normal 7, Plague stage boss 5
+20:34:11 265        460666     443816        0         0  
+20:34:20 30          22181      11115       12      0.54  Plague normal 7, Plague stage boss 5
+20:36:16 267        462108     444358        0         0  
+20:36:29 32          23682      11709       13      0.55  Plague normal 8, Plague stage boss 5
+20:38:21 269        463552     445056        0         0  
+20:38:38 35          25187      12446       14      0.56  Plague normal 8, Plague stage boss 6

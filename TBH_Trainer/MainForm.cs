@@ -42,8 +42,9 @@ internal sealed class MainForm : Form
     private CheckBox _chkAutoOpenBoxes = null!;
     private CheckBox _chkBagToStash = null!;
     private Button _btnBagToStashNow = null!;
-    private Button _btnChestUpgrades = null!;
-    private ComboBox _cmbChestChance = null!;
+    // The Chest upgrades button is gone: writing the drop-chance upgrade up to +1,000,000%
+    // measured the same as leaving it alone. `do chestupgrades` and `do chestread` still work
+    // through the debug channel if it is ever worth re-testing.
     private Button _btnChestLog = null!;
 
     private ItemScanBridge? _scanBridge;
@@ -481,25 +482,11 @@ internal sealed class MainForm : Form
         _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
         _btnBagToStashNow.Enabled = false;
         _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
-        // What to write into the two chest drop-chance upgrades, in tenths of a percent.
-        // The account sits at 4910 and 8850 (+491% and +885%) before anything is written.
-        _cmbChestChance = new ComboBox
-        {
-            Location = new Point(175, 88), Size = new Size(130, 24),
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            BackColor = BgInput, ForeColor = TextMain, FlatStyle = FlatStyle.Flat,
-        };
-        _cmbChestChance.Items.AddRange(new object[] { "+1,000%", "+10,000%", "+100,000%", "+1,000,000%" });
-        _cmbChestChance.SelectedIndex = 0;
-
-        _btnChestUpgrades = MakeBtn("Chest upgrades", 175, 56, 140);
-        _btnChestUpgrades.Enabled = false;
-        _btnChestUpgrades.Click += (_, _) => OnChestUpgrades();
         _btnChestLog = MakeBtn("Chest log", 325, 56, 120);
         _btnChestLog.Enabled = false;
         _btnChestLog.Click += (_, _) => OnChestLog();
 
-        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog, _cmbChestChance });
+        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestLog });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -1228,7 +1215,6 @@ internal sealed class MainForm : Form
     private void SetGameApiControlsEnabled(bool enabled)
     {
         _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
-        _btnChestUpgrades.Enabled = enabled && _buildProfile.AccStatusGetRva > 0;
         _btnChestLog.Enabled = enabled && _buildProfile.BoxCountRva > 0;
     }
 
@@ -1356,28 +1342,12 @@ internal sealed class MainForm : Form
             Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
             return;
         }
-        _btnChestUpgrades.Enabled = false;
-        try
-        {
-            Log("--- Chest upgrades ---");
-            // The picker is tenths of a percent: +1,000% is 10,000.
-        int perMille = _cmbChestChance.SelectedIndex switch
-        {
-            1 => 100_000,
-            2 => 1_000_000,
-            3 => 10_000_000,
-            _ => 10_000,
-        };
-        // Say what is being written: a silent number here is the difference between +1,000%
-        // and +1,000,000%, and the log is the only record of which one the account got.
+        // No picker any more - the button is gone and the debug channel is the only caller.
+        // +1,000% is where the account was left; raising it further measured the same.
+        const int perMille = 10_000;
         Log($"--- Chest upgrades: writing drop chance {perMille} (= +{perMille / 10.0:N0}%) ---");
         string? result = _heroScanBridge.WriteValue(34, perMille, 1f, timeoutMs: 15000);
-            Log(result?.Trim() ?? "ERROR: the hook did not answer.");
-        }
-        finally
-        {
-            _btnChestUpgrades.Enabled = true;
-        }
+        Log(result?.Trim() ?? "ERROR: the hook did not answer.");
     }
 
     /// <summary>
