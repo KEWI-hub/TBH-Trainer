@@ -266,8 +266,8 @@ struct HeroLocks
     float maxHpValue;
     float attackDamageValue;
     float attackSpeedValue;
-    bool  extra[24];       // one per entry in kExtraStats
-    float extraValue[24];
+    bool  extra[48];       // one per entry in kExtraStats - see the static_assert below it
+    float extraValue[48];
 };
 static HeroLocks g_heroLocks[3] = {};
 
@@ -280,7 +280,9 @@ static volatile bool      g_shuttingDown   = false;
 // StatType. Most are ObscuredFloat; Skill Range is a plain float and Projectile Count /
 // Multistrike are plain ints (Multistrike is stored twice, +0x27C then mirrored to +0x278).
 enum StatKind : uint8_t { kStatObscured = 0, kStatFloat = 1, kStatInt = 2, kStatObscuredInt = 3,
-                          kStatResist = 4 };   // offset holds an EDamageAttribute, not a field offset
+                          kStatResist = 4,     // offset holds an EDamageAttribute, not a field offset
+                          kStatDict = 5 };     // offset holds a StatType; the value lives in the
+                                               // hero's own stat dictionary, not in a Unit field
 
 struct ExtraStat
 {
@@ -329,11 +331,34 @@ static const ExtraStat kExtraStats[] =
     { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f, MAXED },        // = 100%
     { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f, MAXED },        // = 100%
     { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f, MAXED },
+    // These have no Unit field at all - the game reads them straight out of the hero's stat
+    // dictionary, so they are written there by StatType. Chances and caps are ratios where
+    // 1.0 is 100%; the three healing stats are flat HP.
+    { 18,    0,     "Max Dodge Chance",       kStatDict,        1.0f,       MAXED },
+    { 19,    0,     "Max Block Chance",       kStatDict,        1.0f,       MAXED },
+    { 61,    0,     "Elemental Dodge",        kStatDict,        1.0f,       MAXED },
+    { 62,    0,     "Max Elemental Block",    kStatDict,        1.0f,       MAXED },
+    { 63,    0,     "Max Elemental Dodge",    kStatDict,        1.0f,       MAXED },
+    { 29,    0,     "Max Fire Resistance",    kStatDict,        1.0f,       MAXED },
+    { 30,    0,     "Max Cold Resistance",    kStatDict,        1.0f,       MAXED },
+    { 31,    0,     "Max Lightning Resist",   kStatDict,        1.0f,       MAXED },
+    { 32,    0,     "Max Chaos Resistance",   kStatDict,        1.0f,       MAXED },
+    { 64,    0,     "Max All Elemental Res",  kStatDict,        1.0f,       MAXED },
+    { 21,    0,     "Life Leech",             kStatDict,        1.0f,       MAXED },
+    { 23,    0,     "HP Regen Per Sec",       kStatDict,        1000000.0f, MAXED },
+    { 33,    0,     "HP Per Hit",             kStatDict,        1000000.0f, MAXED },
+    { 58,    0,     "HP Per Kill",            kStatDict,        1000000.0f, MAXED },
+    // Gold is a multiplier like IncreaseExpAmount (live heroes sit near 1.0), not a flat
+    // amount, so this is +100,000% rather than a number big enough to wrap the counter.
+    { 74,    0,     "Gold Amount",            kStatDict,        1000.0f,    MAXED },
     // Exp is left alone on purpose - the user does not want levelling touched.
     // BaseAttackCountReduction (+0x204) is deliberately left out: it is a count the attack
     // routine counts down, not a bonus, and winding it up breaks attacks instead of helping.
 };
 static const int kExtraStatCount = static_cast<int>(sizeof(kExtraStats) / sizeof(kExtraStats[0]));
+// The lock arrays are indexed by position in kExtraStats, so adding a row without growing them
+// writes past the end of HeroLocks. Caught here rather than at runtime.
+static_assert(kExtraStatCount <= 48, "HeroLocks.extra[] is smaller than kExtraStats");
 
 // Hero stat commands are not contiguous (12/13 are the combat toggles), so the newer
 // stats live on 22-23 and 25+ and are mapped back to their slot in the table above.
@@ -2224,6 +2249,53 @@ static void* ResistDict(void* unit)
     return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(unit) + 0x260);
 }
 
+// Hero + 0x3D8 is "cache" (xs), xs + 0x10 is the stat holder (bcp), bcp + 0x20 is
+// Dictionary<StatType, float> - the store bcp.mpm(StatType) reads. Field names in that chain
+// are obfuscated except "cache", so the offsets come from the decompiled getter.
+static void* HeroStatDict(void* unit)
+{
+    if (!unit) return nullptr;
+    uint8_t* cache = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(unit) + 0x3D8);
+    if (!cache) return nullptr;                     // monsters and unspawned heroes have none
+    uint8_t* holder = *reinterpret_cast<uint8_t**>(cache + 0x10);
+    if (!holder) return nullptr;
+    return *reinterpret_cast<void**>(holder + 0x20);
+}
+
+// Same shape as the resistance write: the dictionary's own set_Item, so the game sees a normal
+// value rather than a poked field.
+static bool WriteStatDict(void* unit, int32_t statType, float value)
+{
+    void* dict = HeroStatDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
+    void* klass = il2cpp_object_get_class(dict);
+    void* setItem = klass ? il2cpp_class_get_method_from_name(klass, "set_Item", 2) : nullptr;
+    if (!setItem) return false;
+
+    int32_t key = statType;
+    float   val = value;
+    void*   args[2] = { &key, &val };
+    void*   exc = nullptr;
+    il2cpp_runtime_invoke(setItem, dict, args, &exc);
+    return exc == nullptr;
+}
+
+static bool ReadStatDict(void* unit, int32_t statType, float* out)
+{
+    void* dict = HeroStatDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
+    void* klass = il2cpp_object_get_class(dict);
+    void* getItem = klass ? il2cpp_class_get_method_from_name(klass, "get_Item", 1) : nullptr;
+    if (!getItem) return false;
+    int32_t key = statType;
+    void* args[1] = { &key };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(getItem, dict, args, &exc);
+    if (exc || !boxed) return false;               // key absent: the hero does not have it
+    if (out) *out = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+    return true;
+}
+
 static bool WriteResist(void* unit, int32_t attribute, float value)
 {
     void* dict = ResistDict(unit);
@@ -2261,6 +2333,8 @@ static bool WriteExtraStat(void* hero, const ExtraStat& stat, float value)
     if (!hero) return false;
     if (stat.kind == kStatResist)
         return WriteResist(hero, static_cast<int32_t>(stat.offset), value);
+    if (stat.kind == kStatDict)
+        return WriteStatDict(hero, static_cast<int32_t>(stat.offset), value);
     uint8_t* field = reinterpret_cast<uint8_t*>(hero) + stat.offset;
     switch (stat.kind)
     {
@@ -2310,6 +2384,12 @@ static float ReadExtraStat(void* hero, const ExtraStat& stat)
         case kStatFloat:    return *reinterpret_cast<float*>(field);
         case kStatInt:      return static_cast<float>(*reinterpret_cast<int32_t*>(field));
         case kStatResist:   return ReadResist(hero, static_cast<int32_t>(stat.offset));
+        case kStatDict:
+        {
+            float v = 0.0f;
+            ReadStatDict(hero, static_cast<int32_t>(stat.offset), &v);
+            return v;
+        }
     }
     return 0.0f;
 }
@@ -5113,8 +5193,27 @@ static void RunHeroScan()
         { 0x27C, 0x278, "Multistrike",              kStatInt,      0 },
         { 0x29C, 0,     "BlockChance",              kStatFloat,    0 },
         { 0x2A0, 0,     "ElementalBlockChance",     kStatFloat,    0 },
+        // Unidentified. Printed so they can be matched against the in-game stat panel rather
+        // than guessed at: StatType lists 82 stats and these are the only Unit slots left for
+        // HP regen, life leech, HP per hit/kill, max dodge, max block and gold.
+        { 0x1F4, 0,     "unknown +0x1F4 (int)",     kStatObscuredInt, 0 },
+        { 0x268, 0,     "unknown +0x268",           kStatFloat,    0 },
+        { 0x270, 0,     "unknown +0x270",           kStatFloat,    0 },
+        { 0x278, 0,     "unknown +0x278 (int)",     kStatInt,      0 },
+        { 0x298, 0,     "unknown +0x298 (int)",     kStatInt,      0 },
+        { 0x2A4, 0,     "unknown +0x2A4",           kStatFloat,    0 },
         // Dictionary<EDamageAttribute, float> at +0x260, so these four read through the
         // dictionary - printed here to compare what we write against what the game shows.
+        // Read back out of the hero stat dictionary, so a write that silently did nothing is
+        // visible instead of being taken on trust from the lock count.
+        { 18,    0,     "MaxDodgeChance",           kStatDict,     0 },
+        { 19,    0,     "MaxBlockChance",           kStatDict,     0 },
+        { 61,    0,     "ElementalDodgeChance",     kStatDict,     0 },
+        { 21,    0,     "HpLeech",                  kStatDict,     0 },
+        { 23,    0,     "HpRegenPerSec",            kStatDict,     0 },
+        { 33,    0,     "AddHpPerHit",              kStatDict,     0 },
+        { 58,    0,     "AddHpPerKill",             kStatDict,     0 },
+        { 74,    0,     "GoldAmount",               kStatDict,     0 },
         { 1,     0,     "FireResistance",           kStatResist,   0 },
         { 2,     0,     "ColdResistance",           kStatResist,   0 },
         { 3,     0,     "LightningResistance",      kStatResist,   0 },
