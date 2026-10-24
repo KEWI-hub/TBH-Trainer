@@ -4191,6 +4191,90 @@ static void HookedHeroDamage(void* self, float damage, void* attacker, const voi
 
 // Verify the prologue, build a trampoline within reach, then swap the first 8 bytes in one
 // aligned store so the main thread never runs half a jump.
+// Patch `target` to jump to `replacement`, keeping a trampoline that runs the original
+// prologue and jumps back. The prologue is passed in because not every target shares one; it
+// is checked byte for byte first, so a function that has moved is refused rather than mangled.
+static bool InstallDetourAt(uint8_t* target, const uint8_t* prologue, size_t prologueLen,
+                            void* replacement, void** original)
+{
+    if (!target || prologueLen < 5 || prologueLen > 16) return false;
+    if (memcmp(target, prologue, prologueLen) != 0) return false;
+    if ((reinterpret_cast<uintptr_t>(target) & 7) != 0) return false;
+
+    uint8_t* stub = nullptr;
+    uintptr_t base = reinterpret_cast<uintptr_t>(target) & ~static_cast<uintptr_t>(0xFFFF);
+    for (uintptr_t delta = 0x10000; delta < 0x70000000 && !stub; delta += 0x10000)
+        for (int dir = -1; dir <= 1 && !stub; dir += 2)
+            stub = static_cast<uint8_t*>(VirtualAlloc(
+                reinterpret_cast<void*>(dir < 0 ? base - delta : base + delta), 0x1000,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!stub) return false;
+
+    auto absJmp = [](uint8_t* at, const void* dest)
+    {
+        at[0] = 0xFF; at[1] = 0x25; memset(at + 2, 0, 4);
+        void* d = const_cast<void*>(dest);
+        memcpy(at + 6, &d, 8);
+    };
+    absJmp(stub, replacement);
+    uint8_t* tramp = stub + 32;
+    memcpy(tramp, prologue, prologueLen);
+    absJmp(tramp + prologueLen, target + prologueLen);
+
+    DWORD old = 0;
+    if (!VirtualProtect(target, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    *original = tramp;
+    // Start from what is there and overwrite only the prologue. Writing a fixed 8 bytes over a
+    // 6-byte prologue clobbers the instruction after it, and the trampoline then returns into
+    // the middle of it - which is exactly how this crashed the game.
+    uint8_t patch[8];
+    memcpy(patch, target, 8);
+    patch[0] = 0xE9;
+    int32_t rel = static_cast<int32_t>(stub - (target + 5));
+    memcpy(patch + 1, &rel, 4);
+    for (size_t i = 5; i < prologueLen && i < 8; ++i) patch[i] = 0x90;
+    int64_t value = 0;
+    memcpy(&value, patch, 8);
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(target), value);
+    VirtualProtect(target, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, 8);
+    return true;
+}
+
+// --- watching the chest drop chance -------------------------------------------------------
+// float mrl(this, float base, EContentType) at 0xB49FD0: what jeh rolls against.
+typedef float (*DropRateFn)(void* self, float base, int32_t content, const void* method);
+static DropRateFn g_origDropRate = nullptr;
+struct DropSample { float base, chance; int32_t content; };
+static DropSample g_dropSamples[8] = {};
+static volatile LONG g_dropSampleCount = 0;
+
+static float HookedDropRate(void* self, float base, int32_t content, const void* method)
+{
+    float chance = g_origDropRate ? g_origDropRate(self, base, content, method) : 0.0f;
+    // Keep the LAST eight, not the first: the first eight are recorded before anything is
+    // written and then never change, which makes a write look like it did nothing.
+    LONG n = InterlockedIncrement(&g_dropSampleCount) - 1;
+    LONG slot = n % 8;
+    g_dropSamples[slot].base = base;
+    g_dropSamples[slot].chance = chance;
+    g_dropSamples[slot].content = content;
+    return chance;
+}
+
+static bool InstallDropRateTap()
+{
+    static bool tried = false;
+    if (g_origDropRate) return true;
+    if (tried) return false;
+    tried = true;
+    static const uint8_t kProl[6] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x40 };  // push rbx; sub rsp,40h
+    uint8_t* target = reinterpret_cast<uint8_t*>(g_gameAssembly) + 0xB49FD0;
+    return InstallDetourAt(target, kProl, sizeof(kProl),
+                           reinterpret_cast<void*>(&HookedDropRate),
+                           reinterpret_cast<void**>(&g_origDropRate));
+}
+
 static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* original)
 {
     if (*original) return true;
@@ -4562,6 +4646,73 @@ static void RunCeilingProbe()
 // Command 34. value 0 reports, value 1 raises every upgrade that has a known cap.
 // chestPerMille > 0 overrides the cap for the two chest drop-chance upgrades (ids 29 and 30);
 // 0 leaves them reporting only, as before.
+// Command 68: compare the AccountStatus the hook writes with the one the drop roll reads.
+static void RunAccountPointerCheck()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    memset(text, 0, cap);
+    size_t pos = ScanAppend(text, cap, 0, "=== AccountStatus pointer check ===\r\n");
+
+    if (!FindAccountManager())
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: %s\r\n", g_accError);
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    void* ours = nullptr;
+    il2cpp_field_get_value(g_acc.singleton, g_acc.statusField, &ours);
+
+    // The path StageManager.jeh takes: a class pointer in a global, its static fields, the
+    // first of those, then +0x20.
+    // Walking raw pointers out of a global crashed the game once: a null check is not enough
+    // when the global holds something that is not a pointer yet. Every hop is probed first.
+    auto readPtr = [](void* at, void** out) -> bool
+    {
+        if (!at) return false;
+        __try { *out = *reinterpret_cast<void**>(at); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        // Anything that is not a plausible user-mode heap pointer is not followed.
+        uintptr_t v = reinterpret_cast<uintptr_t>(*out);
+        return v > 0x10000 && v < 0x7FFFFFFFFFFF && (v & 7) == 0;
+    };
+
+    uint8_t* base = reinterpret_cast<uint8_t*>(g_gameAssembly);
+    void* theirs = nullptr;
+    void* klass = nullptr; void* statics = nullptr; void* owner = nullptr;
+    if (base && readPtr(base + 0x6185378, &klass) &&
+        readPtr(reinterpret_cast<uint8_t*>(klass) + 0xB8, &statics) &&
+        readPtr(statics, &owner))
+    {
+        readPtr(reinterpret_cast<uint8_t*>(owner) + 0x20, &theirs);
+    }
+
+    pos = ScanAppend(text, cap, pos, "hook writes to  %p\r\n", ours);
+    pos = ScanAppend(text, cap, pos, "drop roll reads %p   (klass %p, statics %p, owner %p)\r\n",
+                     theirs, klass, statics, owner);
+
+    // Read upgrade 29 through each, so a mismatch is shown rather than asserted.
+    // Only the instance we already own is safe to call into. Invoking a getter on the other
+    // pointer hung the request once - it is derived from a raw walk, so it is compared, not
+    // called.
+    int32_t a = 0, b = 0;
+    bool okA = ReadAccountValue(ours, 29, &a);
+    bool okB = false;
+    if (okA) pos = ScanAppend(text, cap, pos, "upgrade 29 via ours   = %d\r\n", a);
+    else     pos = ScanAppend(text, cap, pos, "upgrade 29 via ours   = unreadable\r\n");
+    if (okB) pos = ScanAppend(text, cap, pos, "upgrade 29 via theirs = %d\r\n", b);
+    else     pos = ScanAppend(text, cap, pos, "upgrade 29 via theirs = unreadable\r\n");
+    pos = ScanAppend(text, cap, pos, "\r\n%s\r\n",
+                     (ours && theirs && ours == theirs)
+                         ? "SAME object - the write does reach the drop formula."
+                         : "DIFFERENT objects - the write never reaches the drop formula.");
+
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
 static void RunAccountUpgrades(bool apply, int32_t chestPerMille)
 {
     for (int i = 0; i < kAccountUpgradeCount; ++i)
@@ -5615,6 +5766,34 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     g_heroScan->done = g_speedWatchDone ? 1 : -1;
                     if (!g_speedWatchDone) g_speedWatchEnd = 0;
                 }
+            }
+            else if (g_heroScan->command == 69)
+            {
+                g_heroScan->done = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                    "=== chest drop chance tap ===\r\n");
+                bool on = InstallDropRateTap();
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                    on ? "tap installed; %ld call(s) seen so far\r\n"
+                       : "could not install the tap (prologue did not match)\r\n",
+                    g_dropSampleCount);
+                LONG shown = g_dropSampleCount < 8 ? g_dropSampleCount : 8;
+                for (LONG i = 0; i < shown; ++i)   // the most recent calls
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                        "  base=%.6g  content=%d  ->  chance=%.6g\r\n",
+                        g_dropSamples[i].base, g_dropSamples[i].content, g_dropSamples[i].chance);
+                if (on && g_dropSampleCount == 0)
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                        "  nothing yet - kill something and ask again.\r\n");
+                g_heroScan->length = static_cast<int32_t>(n);
+                g_heroScan->done = 1;
+            }
+            else if (g_heroScan->command == 68)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                RunAccountPointerCheck();
             }
             else if (g_heroScan->command == 67)
             {

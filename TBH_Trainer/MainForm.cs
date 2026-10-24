@@ -800,6 +800,18 @@ internal sealed class MainForm : Form
             case "bagstash":      OnBagToStashNow();      return "bag -> stash requested";
             case "chestlog":      OnChestLog();           return "chest log requested";
             case "chestupgrades": OnChestUpgrades();      return "chest upgrades requested";
+            case "droptap":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(69, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
+            case "accptr":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(68, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
             case "chestread":
             {
                 _heroScanBridge ??= new HeroScanBridge();
