@@ -4,7 +4,7 @@ Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp)
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
 `PATCH_1.00.09_STATUS.md` และ `UPDATE.md` ไว้ในไฟล์เดียว
 
-**เวอร์ชัน trainer:** v2.4.2 (ชื่อโปรแกรมเปลี่ยนจาก `TBH Trainer.exe` เป็น `KEWI_TBH.exe`)
+**เวอร์ชัน trainer:** v2.5.0 (ชื่อโปรแกรมเปลี่ยนจาก `TBH Trainer.exe` เป็น `KEWI_TBH.exe`)
 **เวอร์ชันเกมที่รองรับ:** 1.00.08, 1.00.09, 1.2.4, 1.2.6, 1.2.7, 1.2.8, 1.3.0 และ **1.3.1** (build 26151704, profile `V131`)
 **อัปเดตล่าสุด:** 2026-10-23 (เกมอัปเดตเป็น 1.3.1 build 26151704)
 
@@ -109,6 +109,57 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 ปุ่ม **Max stats (all heroes)** ตั้งทั้ง 8 ค่าให้ฮีโร่ทั้ง 3 ช่องพร้อมกัน: Attack Damage 1,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## เปลี่ยนแปลงใน v2.5.0
+
+### Max stats ครบทุกค่าฝั่ง Defense และ Gold
+
+สเตตัสอย่าง Life Leech, HP Regen, HP per Hit/Kill, Max Dodge/Block, Gold **ไม่มี field บน `Unit`**
+หาเท่าไหร่ก็ไม่เจอ เพราะหาผิดที่มาตลอด
+
+Ghidra ไขให้: สเตตัสทั้ง **82 ค่าของ `StatType` อยู่ใน `Dictionary<StatType, float>`**
+
+```
+Hero + 0x3D8  ->  xs     <- field ชื่อ "cache" ไม่ถูก obfuscate
+xs   + 0x10   ->  bcp
+bcp  + 0x20   ->  Dictionary<StatType, float>
+```
+
+`Hero.hbf(StatType)` เป็นแค่ตัว **mirror** — switch ของ StatType 1-10 ที่ copy สิบค่าไปไว้ที่ field
+บน `Unit` และแผนที่ของมันตรงกับตารางที่ฮุกใช้อยู่ทุกตัว ที่เหลือเกมอ่านจาก dictionary ตอนใช้งาน
+เขียน field ยังไงก็ไม่มีผล
+
+ตอนนี้เขียนผ่าน `set_Item` ของ dictionary เอง รูปแบบเดียวกับที่เขียนค่าต้านทานธาตุอยู่แล้ว
+
+**15 ค่าที่เพิ่ม** — Max Dodge/Block Chance, Elemental Dodge, Max Elemental Dodge/Block,
+Max Fire/Cold/Lightning/Chaos Resistance, Max All Elemental Resistance, Life Leech,
+HP Regen/sec, HP per Hit, HP per Kill, **Gold Amount**
+
+ตัว **Max** สำคัญที่สุด — Dodge/Block ตันที่ 75% การตั้ง Dodge = 100% จึงเสียเปล่า
+ตัวที่ได้ผลจริงคือตัวขยายเพดาน
+
+ยืนยันด้วยการอ่านกลับจาก dictionary ของเกม ไม่ใช่เชื่อตัวนับ ก่อน `HpRegenPerSec 210.2` และ
+`AddHpPerHit 39` หลังเป็น `1e+06` ทั้งคู่ ส่วน Gold = 1000 เพราะเป็นตัวคูณ ฮีโร่ปกติอยู่แถว 1.0
+
+`HeroLocks.extra[]` ขยาย 24 เป็น 48 พร้อม `static_assert` เพราะ array ถูก index ตามตำแหน่ง
+ในตาราง เพิ่มแถวโดยไม่ขยายคือเขียนทะลุ struct
+
+### Move Speed ออกจาก Max stats
+
+ยังตั้งเองได้จากแท็บ Hero Stats
+
+### Chest drop chance เลือกค่าได้
+
+กล่องตัวเลือกใต้ปุ่ม Chest upgrades: +1,000% / +10,000% / +100,000% / +1,000,000%
+ทุกการเขียนพิมพ์ค่าที่เขียนลง log ก่อนเสมอ
+
+**ค่านี้ไม่ค้างถาวร** — รีสตาร์ตเกมแล้วกลับเป็นค่าเดิม (4910 / 8850) ต้องกดใหม่ทุกครั้ง
+
+### Trainer รู้ตัวเมื่อ hook หยุดตอบ
+
+เดิม `IsConnected` เช็คแค่ว่ามี view object อยู่ เกมรีสตาร์ตแล้ว view ค้าง ปุ่มยังกดได้ เขียนลงไป
+ไม่ถึงใคร ดูเหมือนโปรแกรมค้าง ตอนนี้มี watchdog เทียบ heartbeat ทุก 4 วินาที บอกใน log
+แล้วต่อใหม่ให้
 
 ## เปลี่ยนแปลงใน v2.4.2
 
