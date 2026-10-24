@@ -379,6 +379,12 @@ internal sealed class MainForm : Form
         BuildHeroStatsTab(tabHeroes);
         DetectInstalledBuild();
 
+        // Watch the channel rather than trusting it. Writes to a dead view are accepted
+        // silently, which is indistinguishable from the trainer hanging.
+        _bridgeWatch = new System.Windows.Forms.Timer { Interval = 4000 };
+        _bridgeWatch.Tick += (_, _) => CheckBridgeAlive();
+        _bridgeWatch.Start();
+
         Log("Trainer ready.");
         Log("ACTK BYPASS tab: offsets per build — see README.md if a hotfix broke features.");
 
@@ -699,6 +705,38 @@ internal sealed class MainForm : Form
     // measure: AppendText is not subject to it, so the old log was never actually truncated.)
     private const int LogTrimAt = 24000;
 
+    private System.Windows.Forms.Timer? _bridgeWatch;
+    private bool _bridgeWasAlive;
+
+    /// <summary>
+    /// Says it out loud when the channel to the hook dies, and reconnects if the game is still
+    /// there. Without this the buttons stay enabled and do nothing.
+    /// </summary>
+    private void CheckBridgeAlive()
+    {
+        if (!_bridge.IsConnected) { _bridgeWasAlive = false; return; }
+
+        bool alive = _bridge.IsAlive();
+        if (alive) { _bridgeWasAlive = true; return; }
+        if (!_bridgeWasAlive) return;          // already reported; do not repeat every tick
+
+        _bridgeWasAlive = false;
+        Log("WARNING: the hook stopped answering - the game was probably restarted.");
+        _bridge.Drop();
+        _injected = false;
+
+        bool gameGone = true;
+        try { gameGone = _pid < 0 || Process.GetProcessById(_pid).HasExited; } catch { }
+        Log(gameGone
+            ? "  Press Connect once the game is running again."
+            : "  Reconnecting...");
+        if (!gameGone && EnsureSpeedReady())
+        {
+            Log("  Reconnected.");
+            _bridgeWasAlive = true;
+        }
+    }
+
     private DebugServer? _debug;
 
     /// <summary>
@@ -771,6 +809,12 @@ internal sealed class MainForm : Form
             case "bagstash":      OnBagToStashNow();      return "bag -> stash requested";
             case "chestlog":      OnChestLog();           return "chest log requested";
             case "chestupgrades": OnChestUpgrades();      return "chest upgrades requested";
+            case "chestread":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(34, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
             case "scanheroes":    OnScanHeroes(this, EventArgs.Empty); return "hero scan requested";
             case "maxstats":      OnMaxHeroStats(true);   return "max stats requested";
             case "clearmax":      OnMaxHeroStats(false);  return "clear max requested";

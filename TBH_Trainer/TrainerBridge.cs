@@ -49,6 +49,36 @@ internal sealed class TrainerBridge : IDisposable
 
     public bool IsConnected => _view != null;
 
+    /// <summary>
+    /// Whether the channel is actually live. IsConnected only says a view exists, and a view
+    /// onto the block of a game that has since exited looks exactly like a working one: writes
+    /// are accepted and go nowhere. The hook bumps the heartbeat every frame, so a heartbeat
+    /// that has not moved between two checks a few seconds apart means nobody is home.
+    /// </summary>
+    public bool IsAlive()
+    {
+        if (_view == null) return false;
+        try
+        {
+            if (_view.ReadInt32(OffMagic) != Magic) return false;
+            int beat = _view.ReadInt32(OffHeartbeat);
+            bool moved = beat != _lastHeartbeat;
+            _lastHeartbeat = beat;
+            return moved;
+        }
+        catch { return false; }
+    }
+
+    private int _lastHeartbeat = -1;
+
+    /// <summary>Drops the view so the next Connect starts clean.</summary>
+    public void Drop()
+    {
+        _view?.Dispose(); _view = null;
+        _mmf?.Dispose();  _mmf  = null;
+        _lastHeartbeat = -1;
+    }
+
     public bool Connect(int timeoutMs = 3000)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
