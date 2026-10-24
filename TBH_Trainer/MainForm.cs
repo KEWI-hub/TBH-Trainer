@@ -770,9 +770,13 @@ internal sealed class MainForm : Form
             case "help":
             default:
                 return "commands: ping | log [lines] | status | do <action> | help\n" +
-                       "actions:  attach bypass bagstash chestlog chestupgrades scanheroes " +
-                       "maxstats clearmax selfcheck herolayout invscan stashlist\n" +
-                       "          finditem <name> | spawn <key> [n] | speedwatch [secs]";
+                       "actions:\n" +
+                       "  game     attach | bypass | onehit on|off | godmode on|off\n" +
+                       "  heroes   maxstats | clearmax | scanheroes | herolayout\n" +
+                       "  items    bagstash | invscan | stashlist | finditem <name> | spawn <key> [n]\n" +
+                       "  chests   chestlog | chestupgrades | chestread\n" +
+                       "  checks   selfcheck | speedwatch [secs] [speed]\n" +
+                       "  material pull <stashSlot> | mattest <slot> | matadd <slot> [1|2] [bag]";
         }
     }
 
