@@ -289,17 +289,24 @@ struct ExtraStat
     const char* name;
     StatKind    kind;
     float       maxValue;   // used by "max stats" (command 24)
+    bool        inMaxStats; // false: the Hero Stats tab can still write it, the button skips it
 };
+
+// Every row defaults into the Max stats button; the ones that opt out say so.
+#define MAXED   true
+#define BY_HAND false
 
 // Order is fixed: commands 8-11 and 22-23 address the first six by index.
 static const ExtraStat kExtraStats[] =
 {
-    { 0x168, 0,     "Critical Chance",    kStatObscured, 1.0f },        // = 100%
-    { 0x17C, 0,     "Critical Damage",    kStatObscured, 100.0f },      // = 10000%
-    { 0x190, 0,     "Cooldown Reduction", kStatObscured, 10.0f },       // live heroes reach ~1.8
-    { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f },  // under the 1e7 sanity limit
-    { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f },       // live heroes reach ~30
-    { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f },       // live heroes reach ~2.4
+    { 0x168, 0,     "Critical Chance",    kStatObscured, 1.0f, MAXED },        // = 100%
+    { 0x17C, 0,     "Critical Damage",    kStatObscured, 100.0f, MAXED },      // = 10000%
+    { 0x190, 0,     "Cooldown Reduction", kStatObscured, 10.0f, MAXED },       // live heroes reach ~1.8
+    { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f, MAXED },  // under the 1e7 sanity limit
+    // Move Speed stays mapped for the Hero Stats tab but is out of the button: heroes that
+    // sprint are harder to watch, and reach is what Skill Range is for.
+    { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f, BY_HAND },
+    { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f, MAXED },       // live heroes reach ~2.4
     // Reach is what decides whether a hero ever touches a monster, and only a hero's kill drops
     // anything - measured over three builds of trying to kill them ourselves. So these two are
     // deliberately far past what a live hero reaches: heroes that cover the arena leave nothing
@@ -307,21 +314,21 @@ static const ExtraStat kExtraStats[] =
     // Reach is what stops monsters being stranded at high speed, but 30 fills the screen with
     // skill effects, and below ~5x nothing gets stranded anyway. The button stays at a value
     // that is playable; the Hero Stats tab can write any number on top of it.
-    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 10.0f },
-    { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f },
-    { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
-    { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
-    { 0x1A4, 0,     "Damage Reduction",   kStatObscured, 1.0f },        // live heroes sit at ~0
+    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 10.0f, MAXED },
+    { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f, MAXED },
+    { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f, MAXED },        // each one is a real projectile
+    { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f, MAXED },        // extra hits per swing
+    { 0x1A4, 0,     "Damage Reduction",   kStatObscured, 1.0f, MAXED },        // live heroes sit at ~0
     // These four are dictionary keys (EDamageAttribute), not field offsets.
-    { 1,     0,     "Fire Resistance",      kStatResist, 1.0f },
-    { 2,     0,     "Cold Resistance",      kStatResist, 1.0f },
-    { 3,     0,     "Lightning Resistance", kStatResist, 1.0f },
-    { 4,     0,     "Chaos Resistance",     kStatResist, 1.0f },
-    { 0x1B8, 0,     "Damage Absorption",  kStatObscured,    1.0f },
-    { 0x1CC, 0,     "Dodge Chance",       kStatObscured,    1.0f },        // = 100%
-    { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f },        // = 100%
-    { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f },        // = 100%
-    { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f },
+    { 1,     0,     "Fire Resistance",      kStatResist, 1.0f, MAXED },
+    { 2,     0,     "Cold Resistance",      kStatResist, 1.0f, MAXED },
+    { 3,     0,     "Lightning Resistance", kStatResist, 1.0f, MAXED },
+    { 4,     0,     "Chaos Resistance",     kStatResist, 1.0f, MAXED },
+    { 0x1B8, 0,     "Damage Absorption",  kStatObscured,    1.0f, MAXED },
+    { 0x1CC, 0,     "Dodge Chance",       kStatObscured,    1.0f, MAXED },        // = 100%
+    { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f, MAXED },        // = 100%
+    { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f, MAXED },        // = 100%
+    { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f, MAXED },
     // Exp is left alone on purpose - the user does not want levelling touched.
     // BaseAttackCountReduction (+0x204) is deliberately left out: it is a count the attack
     // routine counts down, not a bonus, and winding it up breaks attacks instead of helping.
@@ -4473,8 +4480,14 @@ static void RunCeilingProbe()
 }
 
 // Command 34. value 0 reports, value 1 raises every upgrade that has a known cap.
-static void RunAccountUpgrades(bool apply)
+// chestPerMille > 0 overrides the cap for the two chest drop-chance upgrades (ids 29 and 30);
+// 0 leaves them reporting only, as before.
+static void RunAccountUpgrades(bool apply, int32_t chestPerMille)
 {
+    for (int i = 0; i < kAccountUpgradeCount; ++i)
+        if (g_accountUpgrades[i].id == 29 || g_accountUpgrades[i].id == 30)
+            g_accountUpgrades[i].cap = chestPerMille > 0 ? chestPerMille : 0;
+
     char* text = g_heroScan->text;
     const size_t cap = sizeof(g_heroScan->text);
     size_t pos = ScanAppend(text, cap, 0, "=== Chest upgrades (the game's own account values) ===\r\n");
@@ -4799,6 +4812,7 @@ static void RunHeroCommand()
             locks.attackSpeedValue = kMaxAttackSpeed;
             for (int i = 0; i < kExtraStatCount; ++i)
             {
+                if (!kExtraStats[i].inMaxStats) continue;   // left to the Hero Stats tab
                 locks.extra[i] = on;
                 locks.extraValue[i] = kExtraStats[i].maxValue;
             }
@@ -4811,8 +4825,9 @@ static void RunHeroCommand()
                 "OK: Max stats ON for all 3 heroes - Attack Damage %.6g, Attack Speed %.6g",
                 kMaxAttackDamage, kMaxAttackSpeed);
             for (int i = 0; i < kExtraStatCount; ++i)
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n, ", %s %.6g",
-                    kExtraStats[i].name, kExtraStats[i].maxValue);
+                if (kExtraStats[i].inMaxStats)
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n, ", %s %.6g",
+                        kExtraStats[i].name, kExtraStats[i].maxValue);
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
                 " (re-applied every ~0.2s, also to heroes that spawn or revive later)\r\n");
         }
@@ -5447,7 +5462,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 g_heroScan->length = 0;
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
                 if (g_heroScan->value == 2.0f) RunCeilingProbe();
-                else RunAccountUpgrades(g_heroScan->value != 0.0f);
+                else RunAccountUpgrades(g_heroScan->value != 0.0f, g_heroScan->heroIndex);
             }
             else if (g_heroScan->command == 31)
             {
