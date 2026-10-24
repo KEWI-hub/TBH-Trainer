@@ -1189,15 +1189,9 @@ internal sealed class MainForm : Form
             Log("  … (see saved file for full list)");
     }
 
-    // HP stays exact as a float up to 2^24; Attack Speed above ~50 gains nothing at 60 fps.
-    private const float AutoHeroHpValue = 2_000_000_000f;
-    private const float AutoHeroAttackSpeedValue = 50f;
-    // Unit stats are stored as ratios: live heroes show crit chance 0.03-0.37 (1.0 = 100%),
-    // crit damage 3-8x and cooldown reduction up to ~1.8. No cap exists in the data tables,
-    // so these stay well above live values without pushing cooldowns towards zero.
-    private const float AutoHeroCritChanceValue = 1f;
-    private const float AutoHeroCritDamageValue = 100f;
-    private const float AutoHeroCdrValue = 10f;
+    // The five values the auto setup used to write by hand are gone: it applies Max stats now,
+    // which covers them and the stats they left out. The hook owns those numbers (kMaxAttackDamage
+    // and friends in dllmain.cpp), so there is one place to change them instead of two.
     // Live armor is ~9k-90k; stay under the hook's 1e7 re-apply sanity limit.
     private const float GodModeArmorValue = 5_000_000f;
 
@@ -1216,23 +1210,14 @@ internal sealed class MainForm : Form
             return;
         }
 
-        Log($"--- Auto hero lock: HP = {AutoHeroHpValue:N0}, Attack Speed = {Fmt(AutoHeroAttackSpeedValue)}, " +
-            $"Crit Chance = {Fmt(AutoHeroCritChanceValue)}, Crit Damage = {Fmt(AutoHeroCritDamageValue)}, CDR = {Fmt(AutoHeroCdrValue)} ---");
+        Log("--- Auto hero lock: Max stats on every hero ---");
         OnScanHeroes(null, EventArgs.Empty);
 
-        for (int hero = 0; hero < _cmbHeroIndex.Items.Count; hero++)
-        {
-            // 5 = HP, 4 = Attack Speed, 8 = Crit Chance, 9 = Crit Damage, 10 = CDR
-            foreach (var (command, value) in new[]
-                     {
-                         (5, AutoHeroHpValue), (4, AutoHeroAttackSpeedValue),
-                         (8, AutoHeroCritChanceValue), (9, AutoHeroCritDamageValue), (10, AutoHeroCdrValue),
-                     })
-            {
-                string? result = _heroScanBridge.WriteValue(command, hero, value);
-                Log("  " + (result?.Trim() ?? $"ERROR: Hero {hero + 1} write timed out."));
-            }
-        }
+        // Max stats rather than the five locks this used to write. Those left Skill Range at 0,
+        // and without reach the heroes never land the killing blow: the stranded-monster handler
+        // does it for them, thousands of times an hour. Measured overnight with Max stats on,
+        // 90% of 393,171 kills were the heroes' own; the night before it was none of them.
+        OnMaxHeroStats(true);
         Log("Auto hero lock done. Locks re-apply every ~0.2s (also to heroes that spawn or revive later); use \"Clear Hero Locks\" to release.");
 
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
