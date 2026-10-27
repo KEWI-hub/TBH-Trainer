@@ -150,6 +150,9 @@ typedef char* (*il2cpp_type_get_name_t)(const void* type);
 typedef void (*il2cpp_free_t)(void* ptr);
 typedef const void* (*il2cpp_class_get_type_t)(void* klass);
 typedef void* (*il2cpp_type_get_object_t)(const void* type);
+typedef uint32_t (*il2cpp_method_get_flags_t)(void* method, uint32_t* iflags);
+typedef const void* (*il2cpp_method_get_return_type_t)(void* method);
+typedef const char* (*il2cpp_image_get_name_t)(void* image);
 
 // Used by the read-only hero layout dump (metadata only, never dereferences objects).
 static il2cpp_field_get_offset_t il2cpp_field_get_offset;
@@ -158,6 +161,9 @@ static il2cpp_type_get_name_t    il2cpp_type_get_name;
 static il2cpp_free_t             il2cpp_free;
 static il2cpp_class_get_type_t   il2cpp_class_get_type;
 static il2cpp_type_get_object_t  il2cpp_type_get_object;
+static il2cpp_method_get_flags_t       il2cpp_method_get_flags;
+static il2cpp_method_get_return_type_t il2cpp_method_get_return_type;
+static il2cpp_image_get_name_t         il2cpp_image_get_name;
 
 static il2cpp_domain_get_t                 il2cpp_domain_get;
 static il2cpp_thread_attach_t              il2cpp_thread_attach;
@@ -305,7 +311,7 @@ static const ExtraStat kExtraStats[] =
     // Reach is what stops monsters being stranded at high speed, but 30 fills the screen with
     // skill effects, and below ~5x nothing gets stranded anyway. The button stays at a value
     // that is playable; the Hero Stats tab can write any number on top of it.
-    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 10.0f },
+    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 5.0f },        // 10 filled the screen, 3 killed too slowly
     { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f },
     { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
     { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
@@ -423,6 +429,9 @@ static bool LoadIl2Cpp()
     il2cpp_free                       = Resolve<il2cpp_free_t>(g_gameAssembly,                        "il2cpp_free");
     il2cpp_class_get_type             = Resolve<il2cpp_class_get_type_t>(g_gameAssembly,              "il2cpp_class_get_type");
     il2cpp_type_get_object            = Resolve<il2cpp_type_get_object_t>(g_gameAssembly,             "il2cpp_type_get_object");
+    il2cpp_method_get_flags           = Resolve<il2cpp_method_get_flags_t>(g_gameAssembly,            "il2cpp_method_get_flags");
+    il2cpp_method_get_return_type     = Resolve<il2cpp_method_get_return_type_t>(g_gameAssembly,      "il2cpp_method_get_return_type");
+    il2cpp_image_get_name             = Resolve<il2cpp_image_get_name_t>(g_gameAssembly,              "il2cpp_image_get_name");
 
     return il2cpp_domain_get && il2cpp_thread_attach && il2cpp_domain_get_assemblies &&
            il2cpp_assembly_get_image && il2cpp_class_from_name &&
@@ -1977,7 +1986,10 @@ static const int       kStuckSlots      = 96;
 // standing is genuinely stuck rather than merely not reached yet. The finisher is a safety net
 // again, not the thing doing the killing.
 static const ULONGLONG kStuckFastMs     = 1000;
-static const ULONGLONG kStuckNormalMs   = 1000;
+// At 1x a monster walking in from the edge sits at 1 HP for well over a second, so 1000 ms
+// carried nearly every monster onto the heroes before they could shoot it (self-check on 1.3.1:
+// 7 hero kills against 586 carries in 30 s). Only something genuinely stuck waits this long.
+static const ULONGLONG kStuckNormalMs   = 10000;
 static const int       kStuckPerSweep   = 8;      // finished per sweep, so a wave cannot queue up
 
 // How long a monster may sit at 1 HP before it is finished here. At normal speed the wait stays
@@ -1989,10 +2001,15 @@ static const int       kStuckPerSweep   = 8;      // finished per sweep, so a wa
 // down to 100 ms, which is all it is for now - not patience, just enough frames for a monster
 // that spawned this instant to be registered with the wave before it is killed. At 20x that is
 // two seconds of game time, and on screen it looks immediate.
+// The wait is really game time: 10 s at 1x, 2 s real at 5x, never under 1 s real (10x and up).
+// A flat 1 s at 5x was 5 s of game time - short enough that monsters still walking in were
+// warped onto the heroes, which on screen looked like stutter.
 static ULONGLONG StuckThresholdMs()
 {
-    bool fast = g_shared && g_shared->speedEnabled && g_shared->timeScale > 1.5f;
-    return fast ? kStuckFastMs : kStuckNormalMs;
+    float scale = (g_shared && g_shared->speedEnabled) ? g_shared->timeScale : 1.0f;
+    if (scale <= 1.5f) return kStuckNormalMs;
+    ULONGLONG ms = static_cast<ULONGLONG>(kStuckNormalMs / scale);
+    return ms < kStuckFastMs ? kStuckFastMs : ms;
 }
 
 static const ULONGLONG kStuckRetryMs  = 250;  // between moves, and before the backstop
@@ -2193,16 +2210,37 @@ static size_t MaxHpOffset()
 }
 
 static const float kGodModeHp = 2.0e9f;   // just under int.MaxValue (the game may cast HP to int)
+
+// The heroes' own health controllers, refreshed on every god mode pass. On 1.3.1 monster hits
+// also run through pp.hby, so the damage detour swallowed the heroes' hits on monsters too
+// (self-check: 0 kills by a hero). It now only swallows a hit whose target is in this list.
+static const int kHeroHealthSlots = 8;
+static void* volatile g_heroHealth[kHeroHealthSlots];
+
+static bool IsHeroHealth(void* health)
+{
+    if (!health) return false;
+    for (int i = 0; i < kHeroHealthSlots; ++i)
+        if (g_heroHealth[i] == health) return true;
+    return false;
+}
+
 static void ApplyGodModeAllHeroes()
 {
-    ForEachUnitHealth(1, [](void*, uint8_t* hp)   // DamageableType.Hero
+    void* found[kHeroHealthSlots] = {};
+    int count = 0;
+    ForEachUnitHealth(1, [&](void*, uint8_t* hp)   // DamageableType.Hero
     {
+        if (count < kHeroHealthSlots) found[count++] = hp;
         float& current = *reinterpret_cast<float*>(hp + 0x40);
         float& maxHp = *reinterpret_cast<float*>(hp + MaxHpOffset());
         if (current <= 0.0f) return;         // already dead: leave the game's death flow alone
         if (maxHp < kGodModeHp) maxHp = kGodModeHp;
         current = maxHp;
     });
+    // Keep the last known list while no hero is on the field (menus, stage loads).
+    if (count > 0)
+        for (int i = 0; i < kHeroHealthSlots; ++i) g_heroHealth[i] = found[i];
 }
 
 // Writes one stat, whichever way the game stores it.
@@ -2417,6 +2455,9 @@ static bool MatStashAdd(uint64_t uid, int32_t key, int32_t quantity, int32_t* re
 // clear the leftover. A future build might fix that, so `do matprobe` re-arms the probe - but
 // it costs one duplicated item to find out, so it is never armed on its own.
 static int32_t g_matStashVerdict = -1;
+
+// Bag -> stash moves that went into the Material Stash (through the game's move handler, not kby).
+static volatile LONG g_bagToMatStash = 0;
 
 // Item keys the Material Stash has already refused (it only takes some kinds of material).
 // Kept apart from the DLC answer so the scan can still report the DLC honestly.
@@ -2693,6 +2734,223 @@ static void RunItemSearch()
     g_heroScan->done = 1;
 }
 
+// Command 41: read-only metadata probe for the game's own "move to Material Stash" path.
+// The stash's bulk button (UI_Stash.toggleButton_InventoryToStash) moves materials into the
+// Material Stash properly, and ESlotAction has a MoveToMaterialStash value - so this lists the
+// enum's values, every method that takes an ESlotAction, and the two stash UI classes' methods.
+// Nothing here calls into the game: names, parameter types and addresses only.
+static size_t AppendMethodSignature(char* text, size_t cap, size_t pos, void* klass, void* method)
+{
+    const char* cn = il2cpp_class_get_name ? il2cpp_class_get_name(klass) : "?";
+    const char* ns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace(klass) : "";
+    const char* mn = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "?";
+    uintptr_t base = GameAssemblyBase();
+    uintptr_t ptr = reinterpret_cast<uintptr_t>(MethodPointer(method));
+    pos = ScanAppend(text, cap, pos, "  %s%s%s.%s(", ns && *ns ? ns : "", ns && *ns ? "." : "", cn, mn);
+    uint8_t n = il2cpp_method_get_param_count ? il2cpp_method_get_param_count(method) : 0;
+    for (uint8_t p = 0; p < n; ++p)
+    {
+        const void* t = il2cpp_method_get_param ? il2cpp_method_get_param(method, p) : nullptr;
+        char* tn = (t && il2cpp_type_get_name) ? il2cpp_type_get_name(t) : nullptr;
+        pos = ScanAppend(text, cap, pos, "%s%s", p ? ", " : "", tn ? tn : "?");
+        if (tn && il2cpp_free) il2cpp_free(tn);
+    }
+    return ScanAppend(text, cap, pos, ") rva=0x%llX\r\n",
+                      static_cast<unsigned long long>(ptr && base && ptr > base ? ptr - base : 0));
+}
+
+static void RunSlotActionProbe()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== Slot action probe (read-only) ===\r\n");
+    if (!g_domain || !il2cpp_image_get_class_count || !il2cpp_class_get_methods || !il2cpp_type_get_name)
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: il2cpp metadata API not available.\r\n");
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    size_t asmCount = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(g_domain, &asmCount);
+
+    // 1. ESlotAction values.
+    for (size_t a = 0; a < asmCount; ++a)
+    {
+        void* img = il2cpp_assembly_get_image(assemblies[a]);
+        size_t n = img ? il2cpp_image_get_class_count(img) : 0;
+        for (size_t i = 0; i < n; ++i)
+        {
+            void* klass = il2cpp_image_get_class(img, i);
+            const char* cn = klass ? il2cpp_class_get_name(klass) : nullptr;
+            if (!cn || (!Streq(cn, "ESlotAction") && !Streq(cn, "ESlotType") &&
+                        !Streq(cn, "EAddMaterialStashResult")))
+                continue;
+            pos = ScanAppend(text, cap, pos, "%s:", cn);
+            void* iter = nullptr;
+            void* f = nullptr;
+            while ((f = il2cpp_class_get_fields(klass, &iter)) != nullptr)
+            {
+                const char* fn = il2cpp_field_get_name(f);
+                if (!fn || Streq(fn, "value__")) continue;
+                int32_t v = -999;
+                if (il2cpp_field_static_get_value) il2cpp_field_static_get_value(f, &v);
+                pos = ScanAppend(text, cap, pos, " %s=%d", fn, v);
+            }
+            pos = ScanAppend(text, cap, pos, "\r\n");
+        }
+    }
+
+    // 2. Every method with an ESlotAction parameter, and 3. the stash UI classes.
+    pos = ScanAppend(text, cap, pos, "\r\nMethods taking ESlotAction / stash UI methods:\r\n");
+    int shown = 0;
+    for (size_t a = 0; a < asmCount; ++a)
+    {
+        void* img = il2cpp_assembly_get_image(assemblies[a]);
+        size_t n = img ? il2cpp_image_get_class_count(img) : 0;
+        for (size_t i = 0; i < n && shown < 200; ++i)
+        {
+            void* klass = il2cpp_image_get_class(img, i);
+            const char* cn = klass ? il2cpp_class_get_name(klass) : nullptr;
+            if (!cn) continue;
+            bool uiClass = Streq(cn, "UI_Stash") || Streq(cn, "UI_MaterialStash");
+            void* iter = nullptr;
+            void* m = nullptr;
+            while ((m = il2cpp_class_get_methods(klass, &iter)) != nullptr && shown < 200)
+            {
+                bool hit = uiClass;
+                uint8_t pc = il2cpp_method_get_param_count ? il2cpp_method_get_param_count(m) : 0;
+                for (uint8_t p = 0; p < pc && !hit; ++p)
+                {
+                    const void* t = il2cpp_method_get_param(m, p);
+                    char* tn = t ? il2cpp_type_get_name(t) : nullptr;
+                    if (tn && (StrContains(tn, "ESlotAction") || StrContains(tn, "EAddMaterialStashResult")))
+                        hit = true;
+                    if (tn && il2cpp_free) il2cpp_free(tn);
+                }
+                if (!hit) continue;
+                pos = AppendMethodSignature(text, cap, pos, klass, m);
+                ++shown;
+            }
+        }
+    }
+    pos = ScanAppend(text, cap, pos, "%d method(s) listed.\r\n", shown);
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
+// Command 43: full read-only metadata dump to il2cpp_dump.txt next to TBHHook.dll - every
+// class with its parent, fields (offset, type, enum values) and methods (RVA, flags, return
+// and parameter types). It stands in for an Il2CppDumper dump when a game update moves every
+// RVA: the new targets are then found by shape (declaring class, signature) and checked with
+// a disassembler. Metadata only - nothing in the game is called or written.
+static void DumpTypeName(FILE* f, const void* t)
+{
+    char* tn = (t && il2cpp_type_get_name) ? il2cpp_type_get_name(t) : nullptr;
+    fputs(tn ? tn : "?", f);
+    if (tn && il2cpp_free) il2cpp_free(tn);
+}
+
+static void RunMetadataDump()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    wchar_t path[MAX_PATH] = {};
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&RunMetadataDump), &self);
+    GetModuleFileNameW(self, path, MAX_PATH);
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (slash) wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"il2cpp_dump.txt");
+
+    FILE* f = nullptr;
+    if (!g_domain || !il2cpp_image_get_class_count || _wfopen_s(&f, path, L"wb") != 0 || !f)
+    {
+        size_t n = ScanAppend(text, cap, 0, "ERROR: cannot write the dump (il2cpp not ready, or no write access).\r\n");
+        g_heroScan->length = static_cast<int32_t>(n);
+        g_heroScan->done = -1;
+        return;
+    }
+    static char buf[1 << 20];
+    setvbuf(f, buf, _IOFBF, sizeof(buf));
+
+    uintptr_t base = GameAssemblyBase();
+    size_t asmCount = 0, classes = 0, methods = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(g_domain, &asmCount);
+    fprintf(f, "# il2cpp metadata dump, build published by trainer: %d\n",
+            g_shared ? g_shared->buildId : 0);
+    for (size_t a = 0; a < asmCount; ++a)
+    {
+        void* img = il2cpp_assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        const char* imgName = il2cpp_image_get_name ? il2cpp_image_get_name(img) : "?";
+        size_t n = il2cpp_image_get_class_count(img);
+        for (size_t i = 0; i < n; ++i)
+        {
+            void* klass = il2cpp_image_get_class(img, i);
+            if (!klass) continue;
+            ++classes;
+            const char* ns = il2cpp_class_get_namespace(klass);
+            const char* cn = il2cpp_class_get_name(klass);
+            void* parent = il2cpp_class_get_parent ? il2cpp_class_get_parent(klass) : nullptr;
+            const char* pn = parent ? il2cpp_class_get_name(parent) : "";
+            const char* pns = parent ? il2cpp_class_get_namespace(parent) : "";
+            bool isEnum = parent && Streq(pn, "Enum") && Streq(pns, "System");
+            fprintf(f, "C %s%s%s : %s%s%s [%s]\n", ns && *ns ? ns : "", ns && *ns ? "." : "", cn ? cn : "?",
+                    pns && *pns ? pns : "", pns && *pns ? "." : "", pn ? pn : "", imgName ? imgName : "?");
+
+            void* iter = nullptr;
+            void* fld = nullptr;
+            while ((fld = il2cpp_class_get_fields(klass, &iter)) != nullptr)
+            {
+                int32_t flags = il2cpp_field_get_flags ? il2cpp_field_get_flags(fld) : 0;
+                bool isStatic = (flags & 0x10) != 0, isLiteral = (flags & 0x40) != 0;
+                size_t off = (!isStatic && il2cpp_field_get_offset) ? il2cpp_field_get_offset(fld) : 0;
+                fprintf(f, "  F %s0x%zX ", isStatic ? (isLiteral ? "const " : "static ") : "", off);
+                DumpTypeName(f, il2cpp_field_get_type ? il2cpp_field_get_type(fld) : nullptr);
+                fprintf(f, " %s", il2cpp_field_get_name(fld));
+                if (isEnum && isLiteral && il2cpp_field_static_get_value)
+                {
+                    int64_t v = 0;
+                    il2cpp_field_static_get_value(fld, &v);
+                    fprintf(f, " = %d", static_cast<int32_t>(v));
+                }
+                fputc('\n', f);
+            }
+
+            iter = nullptr;
+            void* m = nullptr;
+            while ((m = il2cpp_class_get_methods(klass, &iter)) != nullptr)
+            {
+                ++methods;
+                uintptr_t ptr = reinterpret_cast<uintptr_t>(MethodPointer(m));
+                uint32_t iflags = 0;
+                uint32_t mflags = il2cpp_method_get_flags ? il2cpp_method_get_flags(m, &iflags) : 0;
+                fprintf(f, "  M 0x%llX 0x%04X ",
+                        static_cast<unsigned long long>(ptr && base && ptr > base ? ptr - base : 0), mflags);
+                DumpTypeName(f, il2cpp_method_get_return_type ? il2cpp_method_get_return_type(m) : nullptr);
+                fprintf(f, " %s(", il2cpp_method_get_name(m));
+                uint8_t pc = il2cpp_method_get_param_count ? il2cpp_method_get_param_count(m) : 0;
+                for (uint8_t p = 0; p < pc; ++p)
+                {
+                    if (p) fputs(", ", f);
+                    DumpTypeName(f, il2cpp_method_get_param(m, p));
+                }
+                fputs(")\n", f);
+            }
+        }
+    }
+    fclose(f);
+    size_t pos = ScanAppend(text, cap, 0, "Metadata dump written: %zu assemblies, %zu classes, %zu methods\r\n",
+                            asmCount, classes, methods);
+    char narrow[MAX_PATH * 2] = {};
+    WideCharToMultiByte(CP_UTF8, 0, path, -1, narrow, sizeof(narrow), nullptr, nullptr);
+    pos = ScanAppend(text, cap, pos, "file: %s\r\n", narrow);
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
 // Command 19: list every used stash slot with its category (read-only).
 static void RunStashList()
 {
@@ -2784,12 +3042,11 @@ static void RunInventoryScan()
     // Material Stash: paid DLC, so say plainly whether it is there and how big it is.
     if (HasMaterialStashDlc())
     {
-        pos = ScanAppend(text, cap, pos, "Material Stash: DLC owned, count reports %d; %s%s.\r\n",
-                         MatStashCount(),
-                         g_matStashVerdict > 0 ? "verified: it moves items properly" :
-                         g_matStashVerdict < 0 ? "DISABLED: it duplicated an item" :
-                                                 "not probed yet (first material will probe it)",
-                         g_matRejectedCount ? ", some material kinds were turned away" : "");
+        pos = ScanAppend(text, cap, pos,
+                         "Material Stash: DLC owned, count reports %d; auto stash moves materials "
+                         "there (%ld so far)%s.\r\n",
+                         MatStashCount(), g_bagToMatStash,
+                         g_matRejectedCount ? ", some material kinds were turned away and go to the ordinary stash" : "");
     }
     else
     {
@@ -3084,6 +3341,7 @@ static bool MoveSlotVerified(int32_t srcType, int32_t srcIndex, int32_t dstType,
 // ---------------------------------------------------------------------------------
 static volatile bool g_autoBagMove = false;
 static volatile LONG g_bagMoved = 0;
+static volatile LONG g_bagLandedElsewhere = 0;   // left the bag, but not in the slot we aimed at
 static char      g_bagError[128] = {};
 static int32_t   g_bagFrame = 0;
 static ULONGLONG g_bagNextCheck = 0;
@@ -3126,34 +3384,34 @@ static bool BagMoveStep()
     }
     if (stashTotal > kMaxStashSlots) stashTotal = kMaxStashSlots;
 
+    // A slot that could not be read is not a free slot: moving onto it while the stash is
+    // still loading would drop the item on top of something already there. kUnreadSlot marks
+    // it occupied; ReadSlotItem fails on it, so the stacking pass skips it too.
+    static const uint64_t kUnreadSlot = ~0ULL;
     static uint64_t stash[kMaxStashSlots];
+    int32_t unreadable = 0;
     for (int32_t i = 0; i < stashTotal; ++i)
     {
         bool failed = false;
         stash[i] = unlocked[i] ? SlotUid(rz, uidMethod, kSlotStash, i, &failed) : 0;
-        if (failed) stash[i] = 0;
+        if (failed) { stash[i] = kUnreadSlot; ++unreadable; }
+    }
+    if (unreadable > 0)
+    {
+        sprintf_s(g_bagError, "stash not fully readable yet (%d slot(s)) - waiting", unreadable);
+        return false;
     }
 
     int32_t freeStash = -1;
     for (int32_t i = 0; i < stashTotal; ++i)
         if (unlocked[i] && !stash[i]) { freeStash = i; break; }
 
-    // The material stash is a list of (item key, quantity), not a grid of slots, so there is
-    // no unlock table and no free slot to look for: probe how many entries it holds, and append
-    // past the end. An empty tab probing as zero entries is normal, not a failure.
-    static uint64_t matStash[kMaxStashSlots];
-    int32_t matTotal = 0;
-    bool matStashUsable = HasMaterialStashDlc() && g_matStashVerdict >= 0;
-    if (matStashUsable)
-    {
-        for (; matTotal < kMaxStashSlots; ++matTotal)
-        {
-            bool failed = false;
-            uint64_t uid = SlotUid(rz, uidMethod, kSlotMaterialStash, matTotal, &failed);
-            if (failed) break;
-            matStash[matTotal] = uid;
-        }
-    }
+    // Materials go to the Material Stash tab through the game's own move handler: MoveRequest
+    // with TargetType MATERIALSTASH and TargetIndex = the ITEM KEY (see RunMatMoveTest). The
+    // handler adds via xo.wb.kby and only on Success takes the stack out of the bag, so a
+    // refusal leaves everything as it was. Verified in game on 1.3.1 (key 111001, bag slot
+    // emptied, kcb 139 -> 140, visible in the green tab).
+    bool matStashUsable = HasMaterialStashDlc();
 
     // The bag, oldest slot first.
     int32_t gearSkipped = 0;
@@ -3171,71 +3429,56 @@ static bool BagMoveStep()
         // it, so it stays in the bag. Counted so the trainer can say why the bag is not empty.
         if (it.itemType == kItemTypeGear && it.level < kKeepGearLevel) { ++gearSkipped; continue; }
 
-        // Stackable materials belong in the Material Stash tab when it is available and the
-        // tab has not already turned this kind of material away.
-        bool toMat = matStashUsable && it.itemType == kItemTypeMaterial && !MatStashRefused(it.key);
-        int32_t dstType   = toMat ? kSlotMaterialStash : kSlotStash;
-        uint64_t* slots   = toMat ? matStash : stash;
-        int32_t slotCount = toMat ? matTotal : stashTotal;
-
-        // Stack onto a matching pile first: a full stack fits where one item would. Only
-        // the ordinary stash works this way; the tab stacks by item key on its own.
-        if (!toMat && it.itemType == kItemTypeMaterial && it.maxStack > 1)
+        // Stackable materials go to the Material Stash tab first, unless the tab has already
+        // turned this kind of material away.
+        if (matStashUsable && it.itemType == kItemTypeMaterial && !MatStashRefused(it.key))
         {
-            for (int32_t d = 0; d < slotCount; ++d)
+            MoveSlot(kSlotInventory, i, kSlotMaterialStash, it.key, 0);   // index = item key
+            bool f = false;
+            uint64_t left = SlotUid(rz, uidMethod, kSlotInventory, i, &f);
+            if (!f && left == 0)                 // the whole stack went into the tab
             {
-                if (!slots[d]) continue;
-                if (!toMat && !unlocked[d]) continue;
-                SlotItemInfo dst;
-                if (!ReadSlotItem(slots[d], &dst) || dst.key != it.key) continue;
-                MoveSlot(kSlotInventory, i, dstType, d, 0);
-                bool f = false;
-                if (SlotUid(rz, uidMethod, kSlotInventory, i, &f) != uid)   // the pile took it
-                {
-                    InterlockedIncrement(&g_bagMoved);
-                    return true;
-                }
-                break;   // that pile was full: fall through to a free slot
+                InterlockedIncrement(&g_bagMoved);
+                InterlockedIncrement(&g_bagToMatStash);
+                return true;
             }
+            if (!f && left != uid)               // something else came back: never expected
+            {
+                sprintf_s(g_bagError, "bag slot %d changed to another item on a Material Stash "
+                          "move - auto stash stopped", i);
+                g_autoBagMove = false;
+                return false;
+            }
+            // Still there: the tab does not take this material (or is full). Remember the key
+            // and fall through to the ordinary stash.
+            RememberMatStashRefusal(it.key);
         }
 
-        if (toMat && g_matStashVerdict >= 0)
+        // Stack onto a matching pile in the ordinary stash first: a full stack fits where one
+        // item would.
+        if (it.itemType == kItemTypeMaterial && it.maxStack > 1)
         {
-            int32_t countBefore = MatStashCount();
-            int32_t addResult = -1;
-            int32_t quantity = *reinterpret_cast<int32_t*>(
-                reinterpret_cast<uint8_t*>(ItemByUid(uid)) + 0x50);
-            if (quantity < 1 || quantity > it.maxStack) quantity = 1;
-
-            if (MatStashAdd(uid, it.key, quantity, &addResult))
+            for (int32_t d = 0; d < stashTotal; ++d)
             {
+                if (!stash[d] || !unlocked[d]) continue;
+                SlotItemInfo dst;
+                if (!ReadSlotItem(stash[d], &dst) || dst.key != it.key) continue;
+                MoveSlot(kSlotInventory, i, kSlotStash, d, 0);
                 bool f = false;
-                bool sourceGone = SlotUid(rz, uidMethod, kSlotInventory, i, &f) != uid;
-                int32_t countAfter = MatStashCount();
-
-                if (sourceGone)
+                uint64_t left = SlotUid(rz, uidMethod, kSlotInventory, i, &f);
+                if (!f && left == 0)            // the pile took all of it
                 {
-                    g_matStashVerdict = 1;            // it moves the item: keep using the tab
                     InterlockedIncrement(&g_bagMoved);
                     return true;
                 }
-                if (countAfter > countBefore)
+                if (!f && left != uid)          // something else came back: a swap, not a move
                 {
-                    // It added without taking the item away. One is already duplicated; stop
-                    // before it happens twice, and say so rather than carrying on quietly.
-                    g_matStashVerdict = -1;
-                    sprintf_s(g_bagError,
-                              "Material Stash DUPLICATED item key %d (count %d -> %d, bag kept it) "
-                              "- tab disabled, materials go to the ordinary stash",
-                              it.key, countBefore, countAfter);
+                    sprintf_s(g_bagError, "the game swapped bag slot %d with stash slot %d "
+                              "instead of stacking - stopped", i, d);
+                    g_autoBagMove = false;
                     return false;
                 }
-                // Nothing happened: this kind of material is not for the tab.
-                RememberMatStashRefusal(it.key);
-            }
-            else
-            {
-                RememberMatStashRefusal(it.key);
+                break;   // that pile was full: fall through to a free slot
             }
         }
 
@@ -3246,11 +3489,29 @@ static bool BagMoveStep()
         }
         if (MoveSlot(kSlotInventory, i, kSlotStash, freeStash, 0))
         {
-            bool f = false;
-            if (SlotUid(rz, uidMethod, kSlotInventory, i, &f) != uid)
+            // A move empties the bag slot. A different item showing up there is a swap: stop
+            // the whole feature, so one surprise cannot repeat across the bag.
+            bool f1 = false, f2 = false;
+            uint64_t left = SlotUid(rz, uidMethod, kSlotInventory, i, &f1);
+            uint64_t landed = SlotUid(rz, uidMethod, kSlotStash, freeStash, &f2);
+            if (!f1 && left == 0)
             {
                 InterlockedIncrement(&g_bagMoved);
+                if (!f2 && landed != uid)
+                {
+                    InterlockedIncrement(&g_bagLandedElsewhere);
+                    sprintf_s(g_bagError, "bag %d left the bag but stash %d holds %llX, not %llX",
+                              i, freeStash, static_cast<unsigned long long>(landed),
+                              static_cast<unsigned long long>(uid));
+                }
                 return true;
+            }
+            if (!f1 && left != uid)
+            {
+                sprintf_s(g_bagError, "the game swapped bag slot %d with stash slot %d "
+                          "instead of moving - auto stash stopped", i, freeStash);
+                g_autoBagMove = false;
+                return false;
             }
         }
         strcpy_s(g_bagError, "the game refused the move");
@@ -3417,12 +3678,22 @@ static volatile LONG g_matAddDone = 0;
 static volatile LONG g_matPullSlot = -1;      // stash slot to pull into the bag
 static volatile LONG g_matPullDone = 0;
 
-// xo.wb.kcb() - no-argument int, 5 call sites: the Material Stash's own count. Main thread
+// Material Stash methods the trainer does not publish, per build: 1.3.1 names / 1.3.2 names.
+//   count : wb.kcb() 0x9CECB0                 / wb.kcf() 0xA12840            (5 calls)
+//   adder : wb.kby(int,ulong,int,out int)     / wb.kcc 0xA12260              (7 calls, the
+//           0x9CE6D0                            one the move handlers call)
+//   decoy : wb.kbx 0x9CE420                   / wb.kcb 0xA11FB0              (11-14 calls)
+static uintptr_t MatStashRva(uintptr_t v131, uintptr_t v132)
+{
+    return (g_shared && g_shared->buildId >= 10302) ? v132 : v131;
+}
+
+// The Material Stash's own count: no-argument int, 5 call sites. Main thread
 // only. Returns -1 when it cannot be called, which is not the same as an empty tab.
 static int32_t MatStashCount()
 {
     static void* s_m = nullptr;
-    if (!s_m) s_m = FindMethodByRva(0x9CECB0, 0, nullptr);
+    if (!s_m) s_m = FindMethodByRva(MatStashRva(0x9CECB0, 0xA12840), 0, nullptr);
     if (!s_m) return -1;
     void* exc = nullptr;
     void* boxed = il2cpp_runtime_invoke(s_m, nullptr, nullptr, &exc);
@@ -3435,7 +3706,7 @@ static int32_t MatStashCount()
 static bool MatStashAdd(uint64_t uid, int32_t key, int32_t quantity, int32_t* result)
 {
     static void* s_m = nullptr;
-    if (!s_m) s_m = FindMethodByRva(0x9CE6D0, 4, nullptr);
+    if (!s_m) s_m = FindMethodByRva(MatStashRva(0x9CE6D0, 0xA12260), 4, nullptr);
     if (!s_m) return false;
     int32_t remaining = -1;
     void* args[4] = { &key, &uid, &quantity, &remaining };
@@ -3451,8 +3722,8 @@ static void RunMatStashAdd(int32_t stashIndex, int32_t which, int32_t srcType)
 {
     char* text = g_heroScan->text;
     const size_t cap = sizeof(g_heroScan->text);
-    const uintptr_t kAdderKbx = 0x9CE420;   // xo.wb.kbx - 14 call sites
-    const uintptr_t kAdderKby = 0x9CE6D0;   // xo.wb.kby - 7 call sites
+    const uintptr_t kAdderKbx = MatStashRva(0x9CE420, 0xA11FB0);   // decoy - 14 / 11 call sites
+    const uintptr_t kAdderKby = MatStashRva(0x9CE6D0, 0xA12260);   // real adder - 7 call sites
     uintptr_t rva = which == 2 ? kAdderKby : kAdderKbx;
 
     size_t pos = ScanAppend(text, cap, 0,
@@ -3857,6 +4128,141 @@ static void SpeedWatchTick()
     InterlockedExchange(&g_speedWatchDone, 1);
 }
 
+// Command 42: move ONE material from the bag into the Material Stash through the game's own
+// move handler, and report exactly what changed.
+//
+// Disassembly of 1.3.1 shows why the earlier MoveSlot attempts "did nothing": the handlers that
+// rz.ije routes a MATERIALSTASH target to (e.g. 0x8FD3D0) pass MoveRequest.TargetIndex to
+// xo.wb.kby as the ITEM KEY, not as a slot index, and only after kby returns Success do they
+// take the quantity out of the source slot (0x907100/0xCB9570, or clear it via 0x9072E0).
+// TargetIndex 0 / -1 / end-of-list was key 0 (refused) or rejected outright (< 0 fails the
+// dispatcher's check). Quantity 0 means "the whole stack" (0x90FF00: quantity <= 0).
+static volatile LONG g_matMoveTestReq = 0;
+static volatile LONG g_matMoveTestDone = 0;
+
+static int32_t ItemQuantity(uint64_t uid)
+{
+    void* item = uid ? ItemByUid(uid) : nullptr;
+    return item ? *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(item) + 0x50) : -1;
+}
+
+// Quantity of one item key in the Material Stash, -1 if it has no entry or cannot be read.
+static int32_t MatStashQuantityOfKey(void* rz, void* uidMethod, int32_t key, int32_t* entries)
+{
+    int32_t qty = -1;
+    int32_t n = 0;
+    for (; n < kMaxStashSlots; ++n)
+    {
+        bool failed = false;
+        uint64_t uid = SlotUid(rz, uidMethod, kSlotMaterialStash, n, &failed);
+        if (failed) break;
+        if (!uid) continue;
+        SlotItemInfo it;
+        if (ReadSlotItem(uid, &it) && it.key == key) qty = ItemQuantity(uid);
+    }
+    if (entries) *entries = n;
+    return qty;
+}
+
+static void RunMatMoveTest()
+{
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    size_t pos = ScanAppend(text, cap, 0, "=== Material Stash move test (one item, game's own handler) ===\r\n");
+    LONG verdict = -1;
+
+    void* rz = nullptr;
+    void* uidMethod = nullptr;
+    if (!ResolveSlotApi(&rz, &uidMethod) || !ResolveMoveApi())
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: slot / move API not resolved.\r\n");
+    }
+    else if (!HasMaterialStashDlc())
+    {
+        pos = ScanAppend(text, cap, pos, "Material Stash DLC not owned - nothing to test.\r\n");
+    }
+    else
+    {
+        // Candidates: decoration / soulstone / engraving / inscription first (the tab's own
+        // sections), then any other material. One attempt per item key; a refusal changes
+        // nothing in the game, so the next candidate is tried until one moves.
+        struct Cand { int32_t slot; uint64_t uid; SlotItemInfo it; };
+        static Cand cands[16];
+        int32_t candCount = 0;
+        for (int pass = 0; pass < 2 && candCount < 8; ++pass)
+        {
+            for (int32_t i = 0; i < kMaxInventorySlots && candCount < 8; ++i)
+            {
+                bool failed = false;
+                uint64_t u = SlotUid(rz, uidMethod, kSlotInventory, i, &failed);
+                if (failed) break;
+                SlotItemInfo ci;
+                if (!u || !ReadSlotItem(u, &ci) || ci.itemType != kItemTypeMaterial) continue;
+                bool primary = ci.materialType >= 0 && ci.materialType <= 3;
+                if ((pass == 0) != primary) continue;
+                bool dupKey = false;
+                for (int32_t k = 0; k < candCount; ++k) if (cands[k].it.key == ci.key) dupKey = true;
+                if (dupKey) continue;
+                cands[candCount++] = { i, u, ci };
+            }
+        }
+        if (candCount == 0)
+            pos = ScanAppend(text, cap, pos, "No material in the bag to test with. Open a box first.\r\n");
+
+        for (int32_t c = 0; c < candCount && verdict != 1; ++c)
+        {
+            int32_t slot = cands[c].slot;
+            uint64_t uid = cands[c].uid;
+            SlotItemInfo it = cands[c].it;
+            pos = ScanAppend(text, cap, pos, "-- try %d: material type %d\r\n", c + 1, it.materialType);
+            int32_t bagQtyBefore = ItemQuantity(uid);
+            int32_t entriesBefore = 0;
+            int32_t matQtyBefore = MatStashQuantityOfKey(rz, uidMethod, it.key, &entriesBefore);
+            int32_t countBefore = MatStashCount();
+            pos = ScanAppend(text, cap, pos,
+                "before: bag slot %d uid %llX key %d qty %d | material stash: key qty %d, entries %d, kcb %d\r\n",
+                slot, (unsigned long long)uid, it.key, bagQtyBefore, matQtyBefore, entriesBefore, countBefore);
+
+            bool called = MoveSlot(kSlotInventory, slot, kSlotMaterialStash, it.key, 0);
+
+            bool f = false;
+            uint64_t uidAfter = SlotUid(rz, uidMethod, kSlotInventory, slot, &f);
+            int32_t bagQtyAfter = (uidAfter == uid) ? ItemQuantity(uid) : 0;
+            int32_t entriesAfter = 0;
+            int32_t matQtyAfter = MatStashQuantityOfKey(rz, uidMethod, it.key, &entriesAfter);
+            int32_t countAfter = MatStashCount();
+            pos = ScanAppend(text, cap, pos,
+                "after:  call %s | bag slot %d uid %llX qty %d | material stash: key qty %d, entries %d, kcb %d\r\n",
+                called ? "ok" : "threw", slot, (unsigned long long)uidAfter, bagQtyAfter,
+                matQtyAfter, entriesAfter, countAfter);
+
+            // The quantity field is not trustworthy (read 0 on 1.3.1), so the bag side is judged
+            // by the slot: a whole-stack move (quantity 0) empties it.
+            bool bagDown = (!f && uidAfter != uid) || bagQtyAfter < bagQtyBefore;
+            bool matUp = matQtyAfter > matQtyBefore || countAfter != countBefore || entriesAfter > entriesBefore;
+            if (bagDown && matUp)
+            {
+                verdict = 1;
+                pos = ScanAppend(text, cap, pos,
+                    "RESULT: MOVED - left the bag and the Material Stash changed. Check the green tab.\r\n");
+            }
+            else if (!bagDown && matUp)
+                pos = ScanAppend(text, cap, pos, "RESULT: DUPLICATED - added but the bag kept it. Do not enable.\r\n");
+            else if (bagDown && !matUp)
+            {
+                verdict = 1;   // stop here: one item left the bag, the user checks the tab by eye
+                pos = ScanAppend(text, cap, pos,
+                    "RESULT: LEFT THE BAG, Material Stash count unchanged (may have joined an existing pile)"
+                    " - check the green tab for key %d by hand.\r\n", it.key);
+            }
+            else
+                pos = ScanAppend(text, cap, pos, "RESULT: REFUSED - nothing changed.\r\n");
+        }
+    }
+    g_heroScan->length = static_cast<int32_t>(pos);
+    InterlockedExchange(&g_matMoveTestDone, verdict == 1 ? 1 : 2);
+}
+
 // One-shot jobs that must run on the main thread. This used to live inside BagMoveTick,
 // which only runs while "bag to stash" is switched on - so every one of these quietly did
 // nothing whenever that toggle was off.
@@ -3868,6 +4274,7 @@ static void TestJobTick()
     if (addSlot >= 0) { RunMatStashAdd(static_cast<int32_t>(addSlot), g_matAddWhich, g_matAddSrc); return; }
     LONG pullSlot = InterlockedExchange(&g_matPullSlot, -1);
     if (pullSlot >= 0) { RunStashPull(static_cast<int32_t>(pullSlot)); return; }
+    if (InterlockedExchange(&g_matMoveTestReq, 0)) { RunMatMoveTest(); return; }
     LONG spawnKey = InterlockedExchange(&g_spawnKey, 0);
     if (spawnKey > 0) { RunSpawnItem(static_cast<int32_t>(spawnKey), g_spawnCount); return; }
     SpeedWatchTick();
@@ -4043,7 +4450,11 @@ static void HookedSimUpdate(void* self, const void* method)
     if (g_godMode && !g_shuttingDown && !paused)
     {
         ApplyGodModeAllHeroes();
-        for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
+        // With the damage detour in place heroes take no hits, so the stat locks do not need
+        // rewriting every frame (the worker thread also does it every ~33 ms). Every 10th frame
+        // keeps the per-frame cost down at high speed, where frames are already heavy.
+        if (!g_origHeroDamage || (g_frameCount % 10) == 0)
+            for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
     }
     if (g_oneHitKill && !g_shuttingDown && !paused) StuckMonsterTick();
     if (!g_shuttingDown && !paused) ChestLogTick();
@@ -4067,8 +4478,8 @@ static void HookedSimUpdate(void* self, const void* method)
 // God mode, the reliable way: swallow the damage rather than out-write it.
 //
 // pp.hby(float damage, Unit attacker) is where a hero's health controller takes a hit. The
-// monster controller (pl) overrides it at its own address, so patching this one never touches
-// monsters and one-hit kill keeps working.
+// monster controller (pl) overrides it, but on 1.3.1 monster hits still reach this method, so
+// only hits on a known hero controller (IsHeroHealth) are swallowed.
 //
 // This matters because the game resets the heroes to their base HP during its own update and
 // then keeps simulating; at 20x a single frame can carry ten seconds of game time, so there is
@@ -4078,7 +4489,8 @@ static bool g_heroDamageTried = false;
 
 static void HookedHeroDamage(void* self, float damage, void* attacker, const void* method)
 {
-    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused))
+    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
+        IsHeroHealth(self))
     {
         InterlockedIncrement(&g_heroHitsBlocked);
         return;                      // the hero simply does not take the hit
@@ -4685,8 +5097,9 @@ static void RunSelfCheck()
         g_autoOpenBoxes ? "ON" : "off", boxApi ? "ok" : "NOT resolved",
         boxApi ? "" : " - ", boxApi ? "" : g_boxError, g_boxOpened);
 
-    pos = ScanAppend(text, cap, pos, "bag to stash: %s | bag free slots: %d | moved so far: %ld%s%s\r\n",
-        g_autoBagMove ? "ON" : "off", BagFreeSlots(), g_bagMoved,
+    pos = ScanAppend(text, cap, pos,
+        "bag to stash: %s | bag free slots: %d | moved so far: %ld (%ld to Material Stash, %ld not in the aimed slot)%s%s\r\n",
+        g_autoBagMove ? "ON" : "off", BagFreeSlots(), g_bagMoved, g_bagToMatStash, g_bagLandedElsewhere,
         g_bagError[0] ? " | last note: " : "", g_bagError);
 
     int32_t heldNormal = ChestsHeld(0, 1), heldBoss = ChestsHeld(1, 1), heldAct = ChestsHeld(2, 1);
@@ -4751,7 +5164,11 @@ static void RunHeroCommand()
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
                 "OK: Bag to stash %s%s (moved so far: %ld)%s%s\r\n",
                 on ? "ON" : "OFF",
-                on ? " - when the bag fills up; materials to Material Stash, gear 90+ only" : "",
+                // Materials go to the Material Stash when the DLC is owned (game's own move
+                // handler); otherwise they land in the ordinary stash.
+                !on ? "" : HasMaterialStashDlc()
+                    ? " - when the bag fills up; materials to Material Stash, gear 90+ only"
+                    : " - when the bag fills up; materials to stash, gear 90+ only",
                 g_bagMoved, g_bagError[0] ? " last note: " : "", g_bagError);
         }
         g_heroScan->length = static_cast<int32_t>(n);
@@ -5623,6 +6040,48 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 g_heroScan->length = 0;
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
                 RunStashList();
+            }
+            else if (g_heroScan->command == 41)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunSlotActionProbe();
+            }
+            else if (g_heroScan->command == 43)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                RunMetadataDump();
+            }
+            else if (g_heroScan->command == 42)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                if (!InstallSimUpdateHook())
+                {
+                    g_heroScan->length = static_cast<int32_t>(ScanAppend(
+                        g_heroScan->text, sizeof(g_heroScan->text), 0,
+                        "ERROR: could not install the per-frame hook on this build.\r\n"));
+                    g_heroScan->done = -1;
+                }
+                else
+                {
+                    InterlockedExchange(&g_matMoveTestDone, 0);
+                    InterlockedExchange(&g_matMoveTestReq, 1);
+                    for (int waited = 0; !g_matMoveTestDone && waited < 20000; waited += 50) Sleep(50);
+                    if (!g_matMoveTestDone)
+                    {
+                        InterlockedExchange(&g_matMoveTestReq, 0);
+                        g_heroScan->length = static_cast<int32_t>(ScanAppend(
+                            g_heroScan->text, sizeof(g_heroScan->text), 0,
+                            "ERROR: the per-frame hook never ran the test.\r\n"));
+                        g_heroScan->done = -1;
+                    }
+                    else g_heroScan->done = 1;
+                }
             }
             else if (g_heroScan->command == 14)
             {

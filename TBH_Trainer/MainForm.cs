@@ -44,6 +44,10 @@ internal sealed class MainForm : Form
     private Button _btnBagToStashNow = null!;
     private Button _btnChestUpgrades = null!;
     private Button _btnChestLog = null!;
+    private Button _btnStashList = null!;
+    private Button _btnSlotProbe = null!;
+    private Button _btnMatMoveTest = null!;
+    private Button _btnMetaDump = null!;
 
     private ItemScanBridge? _scanBridge;
 
@@ -134,15 +138,17 @@ internal sealed class MainForm : Form
     // 20x stalled stages and got heroes killed on 1.3.0 even with god mode on; 5x is the
     // fastest that stays stable, and stranded monsters stop happening there at all.
     private const float MaxSpeed = 5f;
+    private const float MinSpeed = 1f;   // below 1x would only slow the game down
 
     public MainForm()
     {
         InitializeComponent();
         InitializeTrayIcon();
-        Shown += async (_, _) =>
+        Shown += (_, _) =>
         {
-            // Offer a newer release before the version warning.
-            await Updater.CheckAsync(this, Log, interactive: false);
+            // Auto-update disabled: this is a locally patched build, and a GitHub release would
+            // overwrite it. Re-enable (and make this handler async again) to offer newer releases.
+            // await Updater.CheckAsync(this, Log, interactive: false);
             if (_startupDllPath != null)
                 WarnIfUnsupportedBuild(_startupDiskBuild, _startupDllPath);
 
@@ -181,11 +187,12 @@ internal sealed class MainForm : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show trainer", null, (_, _) => RestoreFromTray());
         menu.Items.Add("Hide to tray", null, (_, _) => HideToTray());
-        menu.Items.Add("Check for updates", null, async (_, _) =>
-        {
-            RestoreFromTray();
-            await Updater.CheckAsync(this, Log, interactive: true);
-        });
+        // Auto-update disabled (see Shown above).
+        // menu.Items.Add("Check for updates", null, async (_, _) =>
+        // {
+        //     RestoreFromTray();
+        //     await Updater.CheckAsync(this, Log, interactive: true);
+        // });
         menu.Items.Add("Exit", null, (_, _) => Close());
 
         _trayIcon = new NotifyIcon
@@ -435,7 +442,7 @@ internal sealed class MainForm : Form
         _trkSpeed = new TrackBar
         {
             Location = new Point(6, 0), Size = new Size(522, 45),
-            Minimum = 0, Maximum = (int)MaxSpeed, Value = 1, TickFrequency = 2
+            Minimum = (int)MinSpeed, Maximum = (int)MaxSpeed, Value = 1, TickFrequency = 1
         };
         _trkSpeed.ValueChanged += OnSpeedSlider;
 
@@ -445,13 +452,13 @@ internal sealed class MainForm : Form
         _txtSpeed.KeyDown += OnSpeedKeyDown;
         _txtSpeed.Leave += (_, _) => CommitTypedSpeed();
         _lblSpeedValue = new Label { Text = "Speed  1.00", Location = new Point(160, 55), AutoSize = true, ForeColor = AccentCyan, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
-        _lblSpeedStatus = new Label { Text = $"(0x - {MaxSpeed:0}x  -  type and press Enter, or drag)", Location = new Point(265, 56), AutoSize = true, ForeColor = Color.FromArgb(150, 150, 150), Font = new Font("Segoe UI", 8.5f) };
+        _lblSpeedStatus = new Label { Text = $"({MinSpeed:0}x - {MaxSpeed:0}x  -  type and press Enter, or drag)", Location = new Point(265, 56), AutoSize = true, ForeColor = Color.FromArgb(150, 150, 150), Font = new Font("Segoe UI", 8.5f) };
 
         _pnlSpeed.Controls.AddRange(new Control[] { _trkSpeed, _txtSpeed, _lblSpeedValue, _lblSpeedStatus });
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Boxes & Stash (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 125);
+        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 155);
 
         // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
         _chkAutoOpenBoxes = new CheckBox
@@ -462,7 +469,8 @@ internal sealed class MainForm : Form
         _chkAutoOpenBoxes.CheckedChanged += (_, _) => ApplyCombatToggle(16, _chkAutoOpenBoxes.Checked);
 
         // Empties the bag into the stash once it fills up, so boxes keep opening.
-        // Materials go to the Material Stash tab when that DLC is owned; gear is only
+        // Materials go to the Material Stash tab (DLC) through the game's own move handler, and
+        // to the ordinary stash when the tab is not owned or turns a material away. Gear is only
         // kept at level 90+ and lower gear stays in the bag.
         _chkBagToStash = new CheckBox
         {
@@ -480,8 +488,29 @@ internal sealed class MainForm : Form
         _btnChestLog = MakeBtn("Chest log", 325, 56, 120);
         _btnChestLog.Enabled = false;
         _btnChestLog.Click += (_, _) => OnChestLog();
+        // Read-only: lists every stash slot, so a before/after pair shows whether auto stash
+        // ever lost or swapped anything.
+        _btnStashList = MakeBtn("Stash list", 15, 88, 150);
+        _btnStashList.Enabled = false;
+        _btnStashList.Click += (_, _) => OnStashList();
+        // Read-only metadata probe (command 41) for the game's own move-to-Material-Stash path.
+        _btnSlotProbe = MakeBtn("Slot action probe", 175, 88, 140);
+        _btnSlotProbe.Enabled = false;
+        _btnSlotProbe.Click += (_, _) => OnHookReport(41, "Slot action probe");
 
-        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog });
+        // Moves ONE material from the bag into the Material Stash through the game's own move
+        // handler (command 42) and reports before/after, so the path can be checked by eye.
+        _btnMatMoveTest = MakeBtn("Test mat move (1)", 325, 88, 140);
+        _btnMatMoveTest.Enabled = false;
+        _btnMatMoveTest.Click += (_, _) => OnHookReport(42, "Mat move test");
+
+        // Metadata-only dump of every class / field / method (command 43), written next to
+        // TBHHook.dll. Works on any build - it is how a new game build's RVAs get found.
+        _btnMetaDump = MakeBtn("Dump metadata", 15, 120, 150);
+        _btnMetaDump.Enabled = false;
+        _btnMetaDump.Click += (_, _) => OnMetadataDump();
+
+        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog, _btnStashList, _btnSlotProbe, _btnMatMoveTest, _btnMetaDump });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -674,7 +703,7 @@ internal sealed class MainForm : Form
 
         using var tagFont = new Font("Segoe UI", 8.5f);
         using (var tg = new SolidBrush(Color.FromArgb(120, 125, 142)))
-            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.3.1   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Stash",
+            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.3.2   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Stash",
                 tagFont, tg, tx, 50);
 
         using var pen = new Pen(AccentCyan, 2);
@@ -1005,6 +1034,7 @@ internal sealed class MainForm : Form
             _btnWriteHeroStat.Enabled = HeroApiAllowed;
             _btnMaxHeroStats.Enabled = HeroApiAllowed;
             _btnSelfCheck.Enabled = true;
+            _btnMetaDump.Enabled = true;
             SetGameApiControlsEnabled(GameApiAllowed);
             Log($"Connected! PID {_pid} | GameAssembly.dll base: 0x{_mem.GameAssemblyBase.ToInt64():X}");
             AutoSetupAfterConnect();
@@ -1158,6 +1188,9 @@ internal sealed class MainForm : Form
         _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
         _btnChestUpgrades.Enabled = enabled && _buildProfile.AccStatusGetRva > 0;
         _btnChestLog.Enabled = enabled && _buildProfile.BoxCountRva > 0;
+        _btnStashList.Enabled = enabled && _buildProfile.SlotUidRva > 0;
+        _btnSlotProbe.Enabled = enabled;
+        _btnMatMoveTest.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
     }
 
     private void LogCatalogPreview(string report, int maxLines)
@@ -1259,9 +1292,9 @@ internal sealed class MainForm : Form
     /// running frames, which game APIs resolved, heroes and locks, boxes, stash.
     /// </summary>
     /// <summary>
-    /// Command 33 with value 2: moves everything out of the bag right now. Materials go to
-    /// the Material Stash tab when the DLC is owned, gear only at level 90+, everything else
-    /// to the first free stash slot; the toggle keeps its own state.
+    /// Command 33 with value 2: moves everything out of the bag right now. Materials to the
+    /// Material Stash tab when owned, gear only at level 90+, everything else to the first free
+    /// stash slot; the toggle keeps its own state.
     /// </summary>
     private void OnBagToStashNow()
     {
@@ -1327,6 +1360,47 @@ internal sealed class MainForm : Form
         bool clear = (ModifierKeys & Keys.Shift) == Keys.Shift;
         string? result = _heroScanBridge.WriteValue(37, 0, clear ? 1f : 0f, timeoutMs: 15000);
         Log(result?.Trim() ?? "ERROR: the hook did not answer.");
+    }
+
+    /// <summary>
+    /// Command 43: metadata-only dump, allowed on any build (it is what an unknown build needs).
+    /// </summary>
+    private void OnMetadataDump()
+    {
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        Log("Dumping il2cpp metadata (can take a few seconds)...");
+        string? result = _heroScanBridge.WriteValue(43, 0, 0f, timeoutMs: 120000);
+        Log(result?.Trim() ?? "ERROR: metadata dump timed out.");
+    }
+
+    /// <summary>Command 19: the hook's read-only listing of every stash slot.</summary>
+    private void OnStashList() => OnHookReport(19, "Stash list");
+
+    /// <summary>Runs a read-only hook command and logs its report.</summary>
+    private void OnHookReport(int command, string feature)
+    {
+        if (!EnsureGameApiAllowed(feature)) return;
+        _heroScanBridge ??= new HeroScanBridge();
+        if (!_heroScanBridge.TryConnect(3000))
+        {
+            Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
+            return;
+        }
+        string? result = _heroScanBridge.WriteValue(command, 0, 0f, timeoutMs: 30000);
+        Log(result?.Trim() ?? $"ERROR: {feature} timed out.");
+        // The log trims itself, so keep the full report next to the exe as well.
+        if (result != null)
+        {
+            string file = Path.Combine(AppContext.BaseDirectory,
+                feature.Replace(' ', '_').ToLowerInvariant() + ".txt");
+            try { File.WriteAllText(file, result); Log($"(saved to {file})"); }
+            catch (Exception ex) { Log($"(could not save {file}: {ex.Message})"); }
+        }
     }
 
 
@@ -1585,7 +1659,7 @@ internal sealed class MainForm : Form
         _lblSpeedValue.Text = $"Speed  {Fmt(v)}";
 
         _suppressSlider = true;
-        _trkSpeed.Value = (int)Math.Clamp(Math.Round(v), 0, MaxSpeed);
+        _trkSpeed.Value = (int)Math.Clamp(Math.Round(v), MinSpeed, MaxSpeed);
         _suppressSlider = false;
 
         if (_chkSpeed.Checked && _bridge.IsConnected)
@@ -1602,7 +1676,7 @@ internal sealed class MainForm : Form
         if (!float.TryParse(s, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out float v))
             v = 1.0f;
-        return Math.Clamp(v, 0f, MaxSpeed);
+        return Math.Clamp(v, MinSpeed, MaxSpeed);
     }
 
     private static string Fmt(float v) =>

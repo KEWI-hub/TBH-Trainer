@@ -1,4 +1,4 @@
-# KEWI_TBH — คู่มือรวม
+﻿# KEWI_TBH — คู่มือรวม
 
 Trainer สำหรับเกม **Taskbar Hero** (Unity Il2Cpp)
 เอกสารนี้รวมเนื้อหาจาก `BUILD.md`, `MIGRATE_1.00.09.md`, `MONO_CE_GUIDE_1.00.09.md`,
@@ -93,6 +93,9 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 
 ## อัปเดตอัตโนมัติ (v1.4.1 ขึ้นไป)
 
+> **ปิดอยู่ใน build นี้** (แก้ในเครื่อง 2026-10-26) — comment ไว้ใน `MainForm.cs` ทั้งตอนเปิดโปรแกรม
+> และเมนู tray เพื่อไม่ให้ release จาก GitHub โหลดมาทับตัวที่แก้ไว้ ดูหัวข้อ "แก้ในเครื่อง" ด้านล่าง
+
 ตอนเปิดโปรแกรม trainer จะเช็ก Release ล่าสุดของ repo `KEWI-hub/TBH-Trainer` (Public)
 
 - **ทุกคนอัปเดตได้ ไม่ต้องมีบัญชี GitHub ไม่ต้องถูกเชิญ ไม่ต้องใส่ token** — repo เป็น public
@@ -109,6 +112,136 @@ TrainerBuild\       ไฟล์ที่ใช้งานจริง (ไม�
 ปุ่ม **Max stats (all heroes)** ตั้งทั้ง 8 ค่าให้ฮีโร่ทั้ง 3 ช่องพร้อมกัน: Attack Damage 1,000,000 / Attack Speed 50 / Crit Chance 1.0 / Crit Damage 100 / CDR 10 / Armor 5,000,000 / Move Speed 60 / Cast Speed 10
 
 lock ทำงานอยู่ใน hook ที่อยู่ในเกม และผูกกับ**ช่อง** hero ไม่ใช่ตัวละคร จัดทัพใหม่ก็ยังอมตะ ตั้งแต่ v1.4.3 **กด Disconnect หรือปิด trainer แล้ว hook จะหยุดทุกอย่าง** (คืน speed ปกติ) จนกว่าจะ Connect ใหม่
+
+## รองรับเกม 1.3.2 (hotfix, Steam build 26211490, 2026-10-27)
+
+ACTk layout scan หาไม่เจอ (block ของ detector เปลี่ยนรูป: Compare ย้ายจาก +0x190 เป็น +0x340) trainer จึงไม่ inject hook เลย
+ไม่มี Il2CppDumper ในเครื่อง และ GameAssembly.dll ของ 1.3.1 ถูก Steam ทับแล้ว เลยเขียนตัว dump เองที่ `tools\il2dump\`:
+
+```
+dotnet run --project tools\il2dump -c Release -- <GameAssembly.dll> <global-metadata.dat> dump.txt
+dotnet run --project tools\il2dump -c Release -- callers <GameAssembly.dll> <rva-hex>...
+```
+
+- อ่าน metadata v31 + หา CodeGenModule (method pointer ต่อ image) และ MetadataRegistration (types, field offsets) ใน DLL
+- ออกมาเป็นทุก class / field+offset / method+RVA+flags+ชนิดพารามิเตอร์ และ **จำนวน call site** ของแต่ละ method
+- อ่านไฟล์อย่างเดียว ไม่ต้องเปิดเกม
+
+ชื่อ obfuscate สุ่มใหม่ไม่เท่ากันทุก class: ส่วนใหญ่เลื่อน +3/+4 (`sj.iul→iuo`, `Stash.lai→lam`, `wb.kbv→kbz`, `vq.jvb→jvf`,
+`vu.jzh→jzl`), AccountStatus +5 (`mnq→mnv`, `mnr→mnw`), method override คงชื่อเดิม (`Monster.hbd`, `pl.hby`, `pp.hby`)
+ทุกตัวจับคู่ด้วย class + signature + จำนวน call แล้วเช็ค prologue ด้วย dumpbin — รายละเอียดอยู่ใน `GameBuildProfile.V132`
+
+- ACTk: Check `bblv` 0x763DB0, Compare `bblw` 0x7640F0, CompareExt `bblx` 0x7641D0, SpeedHack Update 0x764D50 / OnApplicationPause 0x764CC0
+- InjectionDetector บน IL2CPP เป็น stub ที่ log "not supported" ทุกตัวและเกมไม่เคยเรียกตรงๆ ใช้ `bbla()` (override void) เป็นช่องที่ 6
+- Unit / health controller / item layout เหมือน 1.3.1 ทุก offset
+- Material Stash ใน hook เลือก RVA ตาม build (`MatStashRva`): count `kcf` 0xA12840, adder `kcc` 0xA12260 (handler ส่ง TargetIndex เป็น key เหมือนเดิม 4 ใน 7 call site)
+- ปุ่ม **Dump metadata** (คำสั่ง 43) ทำแบบเดียวกันจากในเกม แต่ใช้ได้เฉพาะตอน hook ถูก inject แล้ว
+- **ทดสอบในเกมแล้ว:** ACTk 6/6, อ่านค่าฮีโร่ถูก, ที่ 5x ฮีโร่ฆ่าเอง 2,385 ตัว hook ไม่ต้องฆ่าเลย, เปิดกล่อง 24 กล่อง, Empty bag ย้าย 41 ชิ้น (เข้าแทปเขียว 5)
+- **ต่อ trainer ใหม่กับเกมที่เปิดค้างอยู่ได้:** ACTk ขึ้น `Already patched` (ไม่เขียนซ้ำ), hook ตัวเดิมยังอยู่ ตัวนับใน Self-check
+  จึงนับต่อจากรอบก่อน (รวม 7,780 ตัวโดยฮีโร่ / 30 ตัวโดย hook ≈ 99.6%) ฮีโร่ที่ยังไม่เกิดตอน Connect ได้ lock ครบเมื่อเกิด
+
+### Speedhack ต่ำสุด 1x (2026-10-27)
+
+แถบเลื่อนเดิมเริ่มที่ 0x ตอนนี้ช่วงเป็น **1x – 5x** (`MinSpeed = 1f` ใน `MainForm.cs`)
+พิมพ์ค่าต่ำกว่า 1 ในช่อง Speed จะถูกปัดเป็น 1.00 ข้อความข้างแถบเป็น `(1x - 5x ...)` และขีดบนแถบทุก 1x
+แก้เฉพาะ trainer ไม่ต้อง build hook ใหม่
+
+## แก้ในเครื่อง (2026-10-26, ต่อจาก v2.4.0 บนเกม 1.3.1)
+
+ไม่ได้ออกเป็น release — แก้ใน source โฟลเดอร์นี้แล้ว build ใช้เอง ตัวที่รันจริงอยู่ที่ `D:\TrainerBuild\`
+(`KEWI_TBH.exe` + `TBHHook.dll`) ตัวเก่าสำรองไว้เป็น `.bak` ในโฟลเดอร์เดียวกัน
+**ถ้าโหลด source ใหม่จาก GitHub มาทับ ทุกข้อด้านล่างจะหายหมด**
+
+### God mode กลืนดาเมจที่ฮีโร่ตีมอนไปด้วย (มอนมากองหน้าฮีโร่)
+
+detour `pp.hby` ของ God mode (มีเฉพาะ 1.3.1) ไม่เรียกของเดิมเลยไม่ว่าเป้าคือใคร แต่บน 1.3.1
+ดาเมจที่ลงมอนก็วิ่งผ่าน `pp.hby` ด้วย ฮีโร่จึงตีมอนไม่เข้า มอนตายได้ทางเดียวคือ hook ยกไปวางที่ฮีโร่
+แล้วสั่งตาย (ไม่ได้ของ) Self-check วัดได้ `0 by a hero, 10 by our damage, 1388 by the death call`
+
+แก้: god mode เก็บ health controller ของฮีโร่ทุกรอบที่เติม HP (`ApplyGodModeAllHeroes`) แล้วกลืนดาเมจ
+**เฉพาะที่เป้าเป็น controller ของฮีโร่** (`IsHeroHealth`) ดาเมจที่ลงมอนผ่านไปตามปกติ
+
+### ตัวจัดการมอนค้างรอนานขึ้น และนับเป็นเวลาในเกม
+
+ตีทีเดียวตายตั้ง HP มอนเป็น 1 ตั้งแต่เกิด ส่วนตัวจัดการมอนค้างรอแค่ 1 วินาทีจริง มอนที่ยังเดินมา
+ไม่ถึงระยะยิงจึงถูกยกไปกองหน้าฮีโร่เกือบทุกตัว (วัดที่ 1x: ยก 586 ครั้งใน 30 วินาที ฮีโร่ฆ่าเอง 7 ตัว)
+
+- `kStuckNormalMs` 1000 → **10000 ms** ที่ 1x
+- เปิด speedhack: รอ **10 วินาทีของเวลาในเกม** (`10000 / timeScale`) ไม่ต่ำกว่า 1 วินาทีจริง
+  → 5x รอ 2 วินาที, 10x ขึ้นไปรอ 1 วินาที เดิม 5x รอ 1 วินาทีจริง = 5 วินาทีในเกม มอนเลยวาร์ป
+
+ผลหลังแก้ที่ 5x เกือบ 5 นาที: `3189 by a hero, 14 by our damage, 1 by the death call`, ยก 16 ครั้ง
+
+### frame hook เบาลง
+
+ตอนเปิด God mode `HookedSimUpdate` เขียน stat lock ของฮีโร่ทั้ง 3 ตัวซ้ำ**ทุกเฟรม** ตอนนี้ทุก 10 เฟรม
+เมื่อ detour ดาเมจติดตั้งแล้ว (ฮีโร่ไม่รับดาเมจอยู่แล้ว และ worker thread ก็เขียนซ้ำทุก ~33 ms)
+การเติม HP ยังทำทุกเฟรมเหมือนเดิม — ที่ 5x fps ขึ้นจาก ~43 เป็น ~56 ภาพลื่นขึ้น
+
+### Max stats: Area of Effect 10 → 5
+
+AoE 10 ทำให้เอฟเฟกต์สกิลใหญ่เต็มจอ ลองลด 3 แล้วรู้สึกฆ่าช้า (ซึ่งที่จริงคือบั๊ก God mode ข้างบน)
+จึงตั้งที่ 5 ยังปรับรายตัวได้จากแท็บ Hero → `Area of Effect Lock`
+
+### Material Stash ใช้ได้แล้ว — ผ่าน move handler ของเกมเอง
+
+หาเจอด้วยการแกะ GameAssembly.dll (`dumpbin /disasm`) ว่าทำไมที่ผ่านมาย้ายไม่ได้:
+
+- `rz.ije(MoveRequest, cb)` (0x901080) ส่งปลายทาง MATERIALSTASH ไปที่ handler เช่น 0x8FD3D0 ซึ่งเอา
+  **`MoveRequest.TargetIndex` ไปเป็น item key** ของ `xo.wb.kby` ไม่ใช่เลขช่อง
+- handler เรียก kby ก่อน **ถ้าได้ Success ค่อยหักของออกจากช่องต้นทาง** (0x907100+0xCB9570 หรือเคลียร์ช่องด้วย 0x9072E0)
+- quantity ≤ 0 = ทั้งกอง (0x90FF00), TargetIndex < 0 ถูก dispatcher ตีกลับ
+- ที่เคยลอง TargetIndex = 0 / −1 / ท้ายลิสต์ จึงเท่ากับ key 0 (ถูกปฏิเสธ) ส่วน kby ตรงๆ ทำของซ้ำเพราะข้ามขั้นหักต้นทาง
+
+ทดสอบในเกม (ปุ่ม **Test mat move (1)**): key 111001 ออกจากกระเป๋าช่อง 35, `kcb` 139 → 140 เห็นในแทปเขียวจริง
+ตอนนี้ auto stash ส่งวัตถุดิบเข้าแทป Material Stash ก่อน (`MoveSlot(INVENTORY, i, MATERIALSTASH, key, 0)`)
+ถ้าแทปไม่รับ (ชนิดที่ไม่มีหมวด เช่น materialType 7) จำ key ไว้แล้วลงคลังปกติแทน ถ้าช่องกระเป๋ากลายเป็นของอื่นจะหยุด auto stash ทันที
+
+**วัตถุดิบในคลังปกติถูกดึงเข้าแทปเขียวไปด้วย (ปกติของเกม)** — วัตถุดิบหนึ่ง key เป็นไอเทมก้อนเดียว (uid เดียว)
+ที่แสดงได้หลายช่อง (เช่น หินวิญญาณ uid `…3188` กินช่อง 1–7 และ 71) พอย้าย key นั้นจากกระเป๋าเข้าแทปเขียว
+เกมย้ายทั้งก้อน รวมส่วนที่อยู่ในคลังปกติด้วย รอบทดสอบ 13:17–13:21 คลังปกติลด 37 → 30 ช่อง หายไป 8 ชนิด
+(หินวิญญาณ-ทรมาน, สกัดไนต์เชด, แท่งฝุ่นดาว, เหล็กสุญญากาศ, แท่งเงิน, แท่งทอง, หนัง, เหรียญครบรอบ 10 ปี)
+ผู้ใช้เช็คแล้วว่า**อยู่ครบในแทปเขียว** — ไม่ใช่ของหาย
+
+ปุ่มช่วยหา: **Slot action probe** (คำสั่ง 41, อ่าน metadata อย่างเดียว) บอกค่า enum และ RVA ของ method ที่เกี่ยว
+บันทึกที่ `slot_action_probe.txt` ข้าง exe — ใช้หาใหม่เมื่อเกมอัปเดต
+
+### ข้อความ Bag → stash ตรงกับที่ทำจริง
+
+checkbox, log ตอนกด Empty bag และข้อความตอน Connect เคยบอกว่า "materials → Material Stash" แต่บน 1.3.1
+แทปนั้นปิดอยู่ (API เดียวที่เติมได้ทำของซ้ำ) วัตถุดิบเข้าคลังปกติ ตอนนี้ข้อความของ hook บอก Material Stash
+เฉพาะเมื่อ probe ยืนยันแล้ว (`g_matStashVerdict > 0`) นอกนั้นบอก "materials to stash"
+
+### Bag → stash ตรวจเข้มขึ้น + ปุ่ม Stash list
+
+เจอคลังอ่านได้ `0 used` กลางเกม และจำนวนช่องคลังระหว่างสองเซสชันไม่ต่อกัน (76 → 63 หลังย้ายเข้า 56 ชิ้น
+ทั้งที่ไม่ได้แตะคลังเอง) พิสูจน์ไม่ได้ว่าของหาย แต่โค้ดเดิมมีจุดอ่อนสองจุด:
+
+- ช่องคลังที่อ่าน uid ไม่ได้ถูกนับเป็น**ช่องว่าง** → ตอนคลังยังโหลดไม่เสร็จอาจย้ายของไปทับช่องที่มีของ
+  ตอนนี้ถ้าอ่านไม่ได้แม้แต่ช่องเดียว จะรอรอบหน้า (`stash not fully readable yet`)
+- นับว่าย้ายสำเร็จแค่ "uid ในช่องกระเป๋าเปลี่ยน" ซึ่งรวมกรณีเกม**สลับ**ของด้วย ตอนนี้ต้องให้ช่องกระเป๋า**ว่าง**
+  ถ้ามีของอื่นโผล่มาแทนถือเป็นการสลับ → **ปิด auto stash ทันที** พร้อมบอกช่องใน Self-check
+  และนับกรณีของออกจากกระเป๋าแต่ไม่อยู่ในช่องที่เล็งไว้ (`N not in the aimed slot`)
+
+ปุ่ม **Stash list** (แท็บหลัก กลุ่ม Boxes & Stash) แสดงทุกช่องในคลังพร้อม uid/key/lv อ่านอย่างเดียว
+กดก่อนและหลังให้ auto stash ทำงาน แล้วเทียบกันได้ว่ามีของหายหรือถูกสลับไหม
+
+### ปิด auto update
+
+comment `Updater.CheckAsync` ทั้งตอนเปิดโปรแกรมและเมนู **Check for updates** ใน `MainForm.cs`
+(`Updater.cs` ยังอยู่ครบ เอา comment ออกแล้วทำ handler `Shown` เป็น async ก็กลับมาใช้ได้)
+
+### Build บนเครื่องนี้
+
+- `build.bat` ทุกตัวขึ้นบรรทัดแบบ LF ทำให้ cmd ฟ้อง `'build.bat' is not recognized` — build ทีละขั้นแทน
+- ไม่มี g++ ใช้ MSVC 2017: `vcvars64.bat` แล้วรันบรรทัด `cl` จาก `TBHHook\build.bat`
+- trainer: `dotnet publish` บรรทัดเดียวกับใน `TBH_Trainer\build.bat`
+- แล้ว copy `publish\KEWI_TBH.exe` + `TBHHook\TBHHook.dll` ไป `D:\TrainerBuild\` (ปิดเกมและ trainer ก่อน)
+
+### ค่าปนเปื้อน (ไม่ใช่บั๊ก)
+
+ค่าปนเปื้อนของดินแดนโรคระบาด**ลดตามเวลาที่อยู่ในด่าน** ไม่ได้หักทีละด่าน (ตาม tooltip ในเกม)
+ตอนเร่งสปีดด่านสั้น บางด่านเลยดูเหมือนไม่ลด trainer ไม่ได้อ่านหรือเขียนค่านี้
 
 ## เปลี่ยนแปลงใน v2.4.0
 
@@ -900,3 +1033,4 @@ prologue ที่ใช้:
 # Support
 
 ถ้า trainer ตัวนี้ช่วยคุณได้ สนับสนุนกันได้ที่ **[ko-fi.com/kewiv](https://ko-fi.com/kewiv)** ☕
+

@@ -433,7 +433,66 @@ internal sealed class GameBuildProfile
         HeroStatsVerified = true,
     };
 
-    public static IReadOnlyList<GameBuildProfile> All { get; } = [V131, V130, V128, V127, V126, V124, V1009, V1008];
+    /// <summary>
+    /// Taskbar Hero 1.3.2 hotfix (Steam build 26211490, 2026-10-27). Derived without
+    /// Il2CppDumper: a static v31 metadata dump (global-metadata.dat + the CodeGenModule /
+    /// MetadataRegistration tables in GameAssembly.dll) plus call-site counts, then checked
+    /// with dumpbin. The RVA -> file offset delta of the il2cpp section is 0x1A00 on this build.
+    ///
+    /// Method names were re-rolled again, but not by one fixed shift: most of the slot/stash
+    /// classes moved +3 or +4 letters (sj.iul -> iuo, Stash.lai -> lam, wb.kbv -> kbz,
+    /// vq.jvb -> jvf, vu.jzh -> jzl), AccountStatus moved +5 (mnq -> mnv, mnr -> mnw), and the
+    /// virtual overrides kept their names (Monster.hbd, pl.hby, pp.hby). Every pick below was
+    /// matched on declaring class + signature + call count against the 1.3.1 notes.
+    ///
+    /// The ACTk block changed shape (Compare moved from +0x190 to +0x340 after Check), which is
+    /// why the layout scan no longer finds it. On IL2CPP every InjectionDetector method is a
+    /// "not supported" logging stub that the game never calls directly; the void override
+    /// bbla() is used for the sixth slot so a RET there cannot hand back a garbage value.
+    /// Unit / health-controller / item layouts are unchanged from 1.3.1.
+    /// </summary>
+    public static GameBuildProfile V132 { get; } = new()
+    {
+        VersionLabel = "1.3.2",
+        BuildId = 10302,
+        ActkTargets =
+        [
+            ("ObscuredCheatingDetector.Check",       0x763DB0, 0x7623B0, [0x41, 0x56, 0x48, 0x83, 0xEC, 0x20]),   // bblv()
+            ("ObscuredCheatingDetector.Compare",     0x7640F0, 0x7626F0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),   // bblw(djh, object, object)
+            ("ObscuredCheatingDetector.CompareExt",  0x7641D0, 0x7627D0, [0x48, 0x89, 0x5C, 0x24, 0x10, 0x48]),   // bblx(djh, bool, object, object)
+            ("InjectionDetector.Check",              0x763230, 0x761830, [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20]),   // bbla() override stub
+            ("SpeedHackDetector.Update",             0x764D50, 0x763350, [0x40, 0x56, 0x48, 0x83, 0xEC, 0x70]),
+            ("SpeedHackDetector.OnApplicationPause", 0x764CC0, 0x7632C0, [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57]),
+        ],
+        HpStatic = 0,
+        HpOffsets = [],
+        AtkStatic = 0,
+        AtkOffsets = [],
+        StashInsertRva = 0,
+        StashSlotRva = 0,
+        StashInitRva = 0,
+        StashSaveDataCtor = 0,
+        ItemAddRva = 0x9D48D0,       // xo.vu.jzl(int, ulong, EItemGetSourceType, int, bool) - 33 calls
+        ItemInfoRva = 0x9D5FE0,      // xo.vu.jzw(int) -> ItemInfoData
+        SlotUidRva = 0x91DE00,       // sj.iuo(ESlotType, int) -> ulong, 38 calls
+        StashCacheRva = 0xA79EC0,    // xo.Stash.lam(int) -> StashCache, 49 calls
+        BoxCountRva = 0x9BAB50,      // xo.vq.jvf(EBoxType, EContentType) -> int, 67 calls (the
+                                     // 38-call jtr/irz/dpd/elg share one forwarder address)
+        MonsterDieRva = 0xE35E70,    // Monster.hbd(Unit) -> bool, the only override of its shape
+        MonsterDamageRva = 0xE41730, // pl.hby(float, Unit) - prologue unchanged
+        MaxHpOffset = 0x50,          // pp: current HP +0x40, max +0x50 (dump)
+        SlotMoveRva = 0x9181E0,      // sj.iti(MoveRequest, Action<MoveResult>), 2 calls
+        AccStatusGetRva = 0xB50310,  // AccountStatus.mnv(EAccountStatus) -> int, 169 calls
+        AccStatusSetRva = 0xB503A0,  // AccountStatus.mnw(EAccountStatus, int), 5 calls
+        MatStashDlcRva = 0xA11CC0,   // xo.wb.kbz() -> bool, 18 calls
+        HeroDamageRva = 0xE42A90,    // pp.hby(float, Unit) - prologue verified before it is patched
+        StashNamespace = "xo",
+        GameApiVerified = true,
+        ItemScanSupported = false,
+        HeroStatsVerified = true,
+    };
+
+    public static IReadOnlyList<GameBuildProfile> All { get; } = [V132, V131, V130, V128, V127, V126, V124, V1009, V1008];
 
     public static GameBuildProfile? Detect(GameMemory mem)
     {
