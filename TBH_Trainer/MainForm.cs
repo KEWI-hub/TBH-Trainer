@@ -463,7 +463,7 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Boxes & Stash (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 155);
+        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 95);   // two rows; the debug buttons under them are hidden
 
         // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
         _chkAutoOpenBoxes = new CheckBox
@@ -489,27 +489,32 @@ internal sealed class MainForm : Form
         _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
         _btnChestLog = MakeBtn("Chest log", 325, 56, 120);
         _btnChestLog.Enabled = false;
+        _btnChestLog.Visible = false;   // debug only - still built, and still reachable from the debug channel
         _btnChestLog.Click += (_, _) => OnChestLog();
         // Read-only: lists every stash slot, so a before/after pair shows whether auto stash
         // ever lost or swapped anything.
         _btnStashList = MakeBtn("Stash list", 15, 88, 150);
         _btnStashList.Enabled = false;
+        _btnStashList.Visible = false;   // debug only - still built, and still reachable from the debug channel
         _btnStashList.Click += (_, _) => OnStashList();
         // Read-only metadata probe (command 41) for the game's own move-to-Material-Stash path.
         _btnSlotProbe = MakeBtn("Slot action probe", 175, 88, 140);
         _btnSlotProbe.Enabled = false;
+        _btnSlotProbe.Visible = false;   // debug only - still built, and still reachable from the debug channel
         _btnSlotProbe.Click += (_, _) => OnHookReport(41, "Slot action probe");
 
         // Moves ONE material from the bag into the Material Stash through the game's own move
         // handler (command 42) and reports before/after, so the path can be checked by eye.
         _btnMatMoveTest = MakeBtn("Test mat move (1)", 325, 88, 140);
         _btnMatMoveTest.Enabled = false;
+        _btnMatMoveTest.Visible = false;   // debug only - still built, and still reachable from the debug channel
         _btnMatMoveTest.Click += (_, _) => OnHookReport(42, "Mat move test");
 
         // Metadata-only dump of every class / field / method (command 43), written next to
         // TBHHook.dll. Works on any build - it is how a new game build's RVAs get found.
         _btnMetaDump = MakeBtn("Dump metadata", 15, 120, 150);
         _btnMetaDump.Enabled = false;
+        _btnMetaDump.Visible = false;   // debug only - still built, and still reachable from the debug channel
         _btnMetaDump.Click += (_, _) => OnMetadataDump();
 
         grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestLog, _btnStashList, _btnSlotProbe, _btnMatMoveTest, _btnMetaDump });
@@ -1682,19 +1687,35 @@ internal sealed class MainForm : Form
                 return;
             }
             _pnlSpeed.Visible = true;
-            float v = ParseSpeed();
+            // Ticking the box means "go fast": it opens at the ceiling rather than at whatever
+            // the slider was last left on. The slider is still there to come back down.
+            ShowSpeed(MaxSpeed);
+            float v = MaxSpeed;
             _bridge.SetSpeed(true, v);
             Log($"Speedhack ENABLED at {Fmt(v)}x.");
         }
         else
         {
             _pnlSpeed.Visible = false;
+            // Put the controls back to 1x as well, so the next tick starts from a known place
+            // rather than showing a number the game is not running at.
+            ShowSpeed(MinSpeed);
             if (_bridge.IsConnected)
             {
                 _bridge.SetSpeed(false, 1.0f);
                 Log("Speedhack disabled (speed restored to 1.00x).");
             }
         }
+    }
+
+    /// <summary>Moves the slider, the box and the readout together, without pushing to the game.</summary>
+    private void ShowSpeed(float v)
+    {
+        _suppressSlider = true;
+        _trkSpeed.Value = (int)Math.Clamp(Math.Round(v), MinSpeed, MaxSpeed);
+        _suppressSlider = false;
+        _txtSpeed.Text = Fmt(v);
+        _lblSpeedValue.Text = $"Speed  {Fmt(v)}";
     }
 
     // Fires for both user drags and programmatic Value changes; _suppressSlider
