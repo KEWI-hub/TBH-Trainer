@@ -789,7 +789,8 @@ internal sealed class MainForm : Form
                        "  items    bagstash | invscan | stashlist | finditem <name> | spawn <key> [n]\n" +
                        "  chests   chestlog | chestupgrades | chestread\n" +
                        "  checks   selfcheck | speedwatch [secs] [speed]\n" +
-                       "  material pull <stashSlot> | mattest <slot> | matadd <slot> [1|2] [bag]";
+                       "  material pull <stashSlot> | matmove | slotprobe\n" +
+                       "           mattest <slot> | matadd <slot> [1|2] [bag]";
         }
     }
 
@@ -929,6 +930,24 @@ internal sealed class MainForm : Form
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
                 return _heroScanBridge.WriteValue(63, pslot, 0f, timeoutMs: 30000)?.Trim()
                        ?? "pull timed out";
+            }
+            case "matmove":
+            {
+                // Command 42: one material out of the bag through the game's own move handler,
+                // the path that actually lands in the tab. The buttons had this and the debug
+                // channel did not, which is how it went untested from here.
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(42, 0, 0f, timeoutMs: 30000)?.Trim()
+                       ?? "mat move timed out";
+            }
+            case "slotprobe":
+            {
+                // Command 41: every move type tried against one slot, written to a file.
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(41, 0, 0f, timeoutMs: 30000)?.Trim()
+                       ?? "slot probe timed out";
             }
             case "mattest":
             {
