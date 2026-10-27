@@ -46,9 +46,10 @@ internal static class Updater
             // No network, GitHub down, or the anonymous rate limit (60 requests per hour per IP).
             log($"Update check failed: {ex.Message}");
             if (interactive)
-                MessageBox.Show(owner, $"Could not reach GitHub to check for updates:\n{ex.Message}\n\n" +
-                                       "You can always download the latest release from\n" + ReleasesUrl,
-                    "Check for updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                LinkMessageBox.Show(owner, "Check for updates",
+                    $"Could not reach GitHub to check for updates:\n{ex.Message}\n\n" +
+                    "You can always download the latest release from:",
+                    ReleasesUrl, ReleasesUrl);
             return;
         }
 
@@ -89,8 +90,9 @@ internal static class Updater
         catch (Exception ex)
         {
             log($"Update failed: {ex.Message}");
-            MessageBox.Show(owner, $"Update failed:\n{ex.Message}\n\nDownload it manually from\n" + ReleasesUrl,
-                "Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            LinkMessageBox.Show(owner, "Update",
+                $"Update failed:\n{ex.Message}\n\nDownload it by hand from:",
+                ReleasesUrl, ReleasesUrl, MessageBoxIcon.Error);
         }
     }
 

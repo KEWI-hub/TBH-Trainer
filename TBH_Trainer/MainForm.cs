@@ -146,11 +146,9 @@ internal sealed class MainForm : Form
     {
         InitializeComponent();
         InitializeTrayIcon();
-        Shown += (_, _) =>
+        Shown += async (_, _) =>
         {
-            // Auto-update disabled: this is a locally patched build, and a GitHub release would
-            // overwrite it. Re-enable (and make this handler async again) to offer newer releases.
-            // await Updater.CheckAsync(this, Log, interactive: false);
+            await Updater.CheckAsync(this, Log, interactive: false);
             if (_startupDllPath != null)
                 WarnIfUnsupportedBuild(_startupDiskBuild, _startupDllPath);
 
@@ -189,12 +187,11 @@ internal sealed class MainForm : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add("Show trainer", null, (_, _) => RestoreFromTray());
         menu.Items.Add("Hide to tray", null, (_, _) => HideToTray());
-        // Auto-update disabled (see Shown above).
-        // menu.Items.Add("Check for updates", null, async (_, _) =>
-        // {
-        //     RestoreFromTray();
-        //     await Updater.CheckAsync(this, Log, interactive: true);
-        // });
+        menu.Items.Add("Check for updates", null, async (_, _) =>
+        {
+            RestoreFromTray();
+            await Updater.CheckAsync(this, Log, interactive: true);
+        });
         menu.Items.Add("Exit", null, (_, _) => Close());
 
         _trayIcon = new NotifyIcon
