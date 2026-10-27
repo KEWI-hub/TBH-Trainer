@@ -3519,7 +3519,15 @@ static bool BagMoveStep()
 
         // Low-level gear is not worth a stash slot and the game gives us no way to get rid of
         // it, so it stays in the bag. Counted so the trainer can say why the bag is not empty.
-        if (it.itemType == kItemTypeGear && it.level < kKeepGearLevel) { ++gearSkipped; continue; }
+        //
+        // Level 0 means the item carries no level requirement at all, which is every chest,
+        // artifact and oddment the game hands out - not weak gear. Those were being read as
+        // "below 90" and left behind, so the bag never emptied. They go to the stash.
+        if (it.itemType == kItemTypeGear && it.level > 0 && it.level < kKeepGearLevel)
+        {
+            ++gearSkipped;
+            continue;
+        }
 
         // Stackable materials go to the Material Stash tab first, unless the tab has already
         // turned this kind of material away.

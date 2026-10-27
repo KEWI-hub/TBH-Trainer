@@ -515,7 +515,8 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(_chkBagToStash,
             "Materials go to the Material Stash tab (DLC) through the game's own move handler,"
             + "\r\nand to the ordinary stash when the tab is not owned or turns a material away."
-            + "\r\nGear is only kept at level 90+; lower gear stays in the bag.");
+            + "\r\nGear is only kept at level 90+; lower gear stays in the bag."
+            + "\r\nItems with no level requirement at all - chests, artifacts - go to the stash.");
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
 
         _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
