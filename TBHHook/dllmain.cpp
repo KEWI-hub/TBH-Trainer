@@ -85,6 +85,8 @@ struct HeroScanState
     int32_t request;
     int32_t done;
     int32_t length;
+    // 60-67 are the trainer's own debug/test commands; they start at 60 because 20-28 are
+    // hero stats and an earlier numbering collided with them, silently breaking max stats.
     int32_t command;   // 0=scan, 1=current HP, 2=max HP, 3=attack damage, 4=attack speed, 5=both HP,
                        // 6=clear locks, 7=layout dump, 8=crit chance, 9=crit damage, 10=cooldown reduction,
                        // 11=armor, 12=one-hit kill toggle, 13=god mode toggle,
@@ -270,8 +272,8 @@ struct HeroLocks
     float maxHpValue;
     float attackDamageValue;
     float attackSpeedValue;
-    bool  extra[24];       // one per entry in kExtraStats
-    float extraValue[24];
+    bool  extra[48];       // one per entry in kExtraStats - see the static_assert below it
+    float extraValue[48];
 };
 static HeroLocks g_heroLocks[3] = {};
 
@@ -284,7 +286,9 @@ static volatile bool      g_shuttingDown   = false;
 // StatType. Most are ObscuredFloat; Skill Range is a plain float and Projectile Count /
 // Multistrike are plain ints (Multistrike is stored twice, +0x27C then mirrored to +0x278).
 enum StatKind : uint8_t { kStatObscured = 0, kStatFloat = 1, kStatInt = 2, kStatObscuredInt = 3,
-                          kStatResist = 4 };   // offset holds an EDamageAttribute, not a field offset
+                          kStatResist = 4,     // offset holds an EDamageAttribute, not a field offset
+                          kStatDict = 5 };     // offset holds a StatType; the value lives in the
+                                               // hero's own stat dictionary, not in a Unit field
 
 struct ExtraStat
 {
@@ -293,17 +297,24 @@ struct ExtraStat
     const char* name;
     StatKind    kind;
     float       maxValue;   // used by "max stats" (command 24)
+    bool        inMaxStats; // false: the Hero Stats tab can still write it, the button skips it
 };
+
+// Every row defaults into the Max stats button; the ones that opt out say so.
+#define MAXED   true
+#define BY_HAND false
 
 // Order is fixed: commands 8-11 and 22-23 address the first six by index.
 static const ExtraStat kExtraStats[] =
 {
-    { 0x168, 0,     "Critical Chance",    kStatObscured, 1.0f },        // = 100%
-    { 0x17C, 0,     "Critical Damage",    kStatObscured, 100.0f },      // = 10000%
-    { 0x190, 0,     "Cooldown Reduction", kStatObscured, 10.0f },       // live heroes reach ~1.8
-    { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f },  // under the 1e7 sanity limit
-    { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f },       // live heroes reach ~30
-    { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f },       // live heroes reach ~2.4
+    { 0x168, 0,     "Critical Chance",    kStatObscured, 1.0f, MAXED },        // = 100%
+    { 0x17C, 0,     "Critical Damage",    kStatObscured, 100.0f, MAXED },      // = 10000%
+    { 0x190, 0,     "Cooldown Reduction", kStatObscured, 10.0f, MAXED },       // live heroes reach ~1.8
+    { 0x140, 0,     "Armor",              kStatObscured, 5000000.0f, MAXED },  // under the 1e7 sanity limit
+    // Move Speed stays mapped for the Hero Stats tab but is out of the button: heroes that
+    // sprint are harder to watch, and reach is what Skill Range is for.
+    { 0x154, 0,     "Move Speed",         kStatObscured, 60.0f, BY_HAND },
+    { 0x12C, 0,     "Cast Speed",         kStatObscured, 10.0f, MAXED },       // live heroes reach ~2.4
     // Reach is what decides whether a hero ever touches a monster, and only a hero's kill drops
     // anything - measured over three builds of trying to kill them ourselves. So these two are
     // deliberately far past what a live hero reaches: heroes that cover the arena leave nothing
@@ -311,26 +322,49 @@ static const ExtraStat kExtraStats[] =
     // Reach is what stops monsters being stranded at high speed, but 30 fills the screen with
     // skill effects, and below ~5x nothing gets stranded anyway. The button stays at a value
     // that is playable; the Hero Stats tab can write any number on top of it.
-    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 5.0f },        // 10 filled the screen, 3 killed too slowly
-    { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f },
-    { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f },        // each one is a real projectile
-    { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f },        // extra hits per swing
-    { 0x1A4, 0,     "Damage Reduction",   kStatObscured, 1.0f },        // live heroes sit at ~0
+    { 0x1E0, 0,     "Area of Effect",     kStatObscured, 5.0f,  BY_HAND },   // 10 filled the screen, 3 killed too slowly
+    { 0x274, 0,     "Skill Range",        kStatFloat,    20.0f, MAXED },
+    { 0x26C, 0,     "Projectile Count",   kStatInt,      5.0f,  BY_HAND },   // each one is a real projectile
+    { 0x27C, 0x278, "Multistrike",        kStatInt,      3.0f,  BY_HAND },   // extra hits per swing
+    { 0x1A4, 0,     "Damage Reduction",   kStatObscured, 1.0f,  MAXED },     // live heroes sit at ~0
     // These four are dictionary keys (EDamageAttribute), not field offsets.
-    { 1,     0,     "Fire Resistance",      kStatResist, 1.0f },
-    { 2,     0,     "Cold Resistance",      kStatResist, 1.0f },
-    { 3,     0,     "Lightning Resistance", kStatResist, 1.0f },
-    { 4,     0,     "Chaos Resistance",     kStatResist, 1.0f },
-    { 0x1B8, 0,     "Damage Absorption",  kStatObscured,    1.0f },
-    { 0x1CC, 0,     "Dodge Chance",       kStatObscured,    1.0f },        // = 100%
-    { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f },        // = 100%
-    { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f },        // = 100%
-    { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f },
+    { 1,     0,     "Fire Resistance",      kStatResist, 1.0f, MAXED },
+    { 2,     0,     "Cold Resistance",      kStatResist, 1.0f, MAXED },
+    { 3,     0,     "Lightning Resistance", kStatResist, 1.0f, MAXED },
+    { 4,     0,     "Chaos Resistance",     kStatResist, 1.0f, MAXED },
+    { 0x1B8, 0,     "Damage Absorption",  kStatObscured,    1.0f, MAXED },
+    { 0x1CC, 0,     "Dodge Chance",       kStatObscured,    1.0f, MAXED },        // = 100%
+    { 0x29C, 0,     "Block Chance",       kStatFloat,       1.0f, MAXED },        // = 100%
+    { 0x2A0, 0,     "Elemental Block",    kStatFloat,       1.0f, MAXED },        // = 100%
+    { 0x25C, 0,     "Damage Addition",    kStatFloat,       1000000.0f, MAXED },
+    // These have no Unit field at all - the game reads them straight out of the hero's stat
+    // dictionary, so they are written there by StatType. Chances and caps are ratios where
+    // 1.0 is 100%; the three healing stats are flat HP.
+    { 18,    0,     "Max Dodge Chance",       kStatDict,        1.0f,       MAXED },
+    { 19,    0,     "Max Block Chance",       kStatDict,        1.0f,       MAXED },
+    { 61,    0,     "Elemental Dodge",        kStatDict,        1.0f,       MAXED },
+    { 62,    0,     "Max Elemental Block",    kStatDict,        1.0f,       MAXED },
+    { 63,    0,     "Max Elemental Dodge",    kStatDict,        1.0f,       MAXED },
+    { 29,    0,     "Max Fire Resistance",    kStatDict,        1.0f,       MAXED },
+    { 30,    0,     "Max Cold Resistance",    kStatDict,        1.0f,       MAXED },
+    { 31,    0,     "Max Lightning Resist",   kStatDict,        1.0f,       MAXED },
+    { 32,    0,     "Max Chaos Resistance",   kStatDict,        1.0f,       MAXED },
+    { 64,    0,     "Max All Elemental Res",  kStatDict,        1.0f,       MAXED },
+    { 21,    0,     "Life Leech",             kStatDict,        1.0f,       MAXED },
+    { 23,    0,     "HP Regen Per Sec",       kStatDict,        1000000.0f, MAXED },
+    { 33,    0,     "HP Per Hit",             kStatDict,        1000000.0f, MAXED },
+    { 58,    0,     "HP Per Kill",            kStatDict,        1000000.0f, MAXED },
+    // Gold is a multiplier like IncreaseExpAmount (live heroes sit near 1.0), not a flat
+    // amount, so this is +100,000% rather than a number big enough to wrap the counter.
+    { 74,    0,     "Gold Amount",            kStatDict,        1000.0f,    MAXED },
     // Exp is left alone on purpose - the user does not want levelling touched.
     // BaseAttackCountReduction (+0x204) is deliberately left out: it is a count the attack
     // routine counts down, not a bonus, and winding it up breaks attacks instead of helping.
 };
 static const int kExtraStatCount = static_cast<int>(sizeof(kExtraStats) / sizeof(kExtraStats[0]));
+// The lock arrays are indexed by position in kExtraStats, so adding a row without growing them
+// writes past the end of HeroLocks. Caught here rather than at runtime.
+static_assert(kExtraStatCount <= 48, "HeroLocks.extra[] is smaller than kExtraStats");
 
 // Hero stat commands are not contiguous (12/13 are the combat toggles), so the newer
 // stats live on 22-23 and 25+ and are mapped back to their slot in the table above.
@@ -2253,6 +2287,53 @@ static void* ResistDict(void* unit)
     return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(unit) + 0x260);
 }
 
+// Hero + 0x3D8 is "cache" (xs), xs + 0x10 is the stat holder (bcp), bcp + 0x20 is
+// Dictionary<StatType, float> - the store bcp.mpm(StatType) reads. Field names in that chain
+// are obfuscated except "cache", so the offsets come from the decompiled getter.
+static void* HeroStatDict(void* unit)
+{
+    if (!unit) return nullptr;
+    uint8_t* cache = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(unit) + 0x3D8);
+    if (!cache) return nullptr;                     // monsters and unspawned heroes have none
+    uint8_t* holder = *reinterpret_cast<uint8_t**>(cache + 0x10);
+    if (!holder) return nullptr;
+    return *reinterpret_cast<void**>(holder + 0x20);
+}
+
+// Same shape as the resistance write: the dictionary's own set_Item, so the game sees a normal
+// value rather than a poked field.
+static bool WriteStatDict(void* unit, int32_t statType, float value)
+{
+    void* dict = HeroStatDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
+    void* klass = il2cpp_object_get_class(dict);
+    void* setItem = klass ? il2cpp_class_get_method_from_name(klass, "set_Item", 2) : nullptr;
+    if (!setItem) return false;
+
+    int32_t key = statType;
+    float   val = value;
+    void*   args[2] = { &key, &val };
+    void*   exc = nullptr;
+    il2cpp_runtime_invoke(setItem, dict, args, &exc);
+    return exc == nullptr;
+}
+
+static bool ReadStatDict(void* unit, int32_t statType, float* out)
+{
+    void* dict = HeroStatDict(unit);
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
+    void* klass = il2cpp_object_get_class(dict);
+    void* getItem = klass ? il2cpp_class_get_method_from_name(klass, "get_Item", 1) : nullptr;
+    if (!getItem) return false;
+    int32_t key = statType;
+    void* args[1] = { &key };
+    void* exc = nullptr;
+    void* boxed = il2cpp_runtime_invoke(getItem, dict, args, &exc);
+    if (exc || !boxed) return false;               // key absent: the hero does not have it
+    if (out) *out = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(boxed) + 0x10);
+    return true;
+}
+
 static bool WriteResist(void* unit, int32_t attribute, float value)
 {
     void* dict = ResistDict(unit);
@@ -2290,6 +2371,8 @@ static bool WriteExtraStat(void* hero, const ExtraStat& stat, float value)
     if (!hero) return false;
     if (stat.kind == kStatResist)
         return WriteResist(hero, static_cast<int32_t>(stat.offset), value);
+    if (stat.kind == kStatDict)
+        return WriteStatDict(hero, static_cast<int32_t>(stat.offset), value);
     uint8_t* field = reinterpret_cast<uint8_t*>(hero) + stat.offset;
     switch (stat.kind)
     {
@@ -2339,6 +2422,12 @@ static float ReadExtraStat(void* hero, const ExtraStat& stat)
         case kStatFloat:    return *reinterpret_cast<float*>(field);
         case kStatInt:      return static_cast<float>(*reinterpret_cast<int32_t*>(field));
         case kStatResist:   return ReadResist(hero, static_cast<int32_t>(stat.offset));
+        case kStatDict:
+        {
+            float v = 0.0f;
+            ReadStatDict(hero, static_cast<int32_t>(stat.offset), &v);
+            return v;
+        }
     }
     return 0.0f;
 }
@@ -2436,13 +2525,16 @@ static const int32_t kSlotMaterialStash = 6; // ESlotType.MATERIALSTASH (paid DL
 // Defined with the bag -> stash code below; the read-only scan reports it too.
 static bool HasMaterialStashDlc();
 
-// God mode's and one-hit kill's damage detours, installed further down; the speed watch
-// reports on them.
+// God mode's damage detour, installed further down; the speed watch reports on it.
+//
+// One-hit kill deliberately does NOT work this way. Making the hero's own hit lethal was tried
+// on 2026-10-24 and measured against the game's own log: with it on, the stage logged 4
+// "[System.Stage] StageCount Error" every five minutes and eventually hung; with it off, none.
+// ApplyOneHitKill already keeps monsters at 1 HP from the worker thread, and two mechanisms
+// killing the same monster is more than the wave counter can take.
 typedef void (*HeroDamageFn)(void* self, float damage, void* attacker, const void* method);
 static HeroDamageFn g_origHeroDamage;
-static HeroDamageFn g_origMonsterDamage;
 static volatile LONG g_heroHitsBlocked;
-static volatile LONG g_monsterHitsAmplified;
 static int32_t MatStashCount();
 static bool MatStashAdd(uint64_t uid, int32_t key, int32_t quantity, int32_t* result);
 
@@ -2685,7 +2777,7 @@ static const char* ItemTypeName(int32_t t)
                  case 2: return "GEAR";     case 3: return "NONE"; default: return "?"; }
 }
 
-// Command 24: search the item database. The query is written into the scan text buffer by the
+// Command 64: search the item database. The query is written into the scan text buffer by the
 // trainer before the request is raised; an all-digits query matches the item key exactly.
 static void RunItemSearch()
 {
@@ -3544,7 +3636,7 @@ static int32_t BagFreeSlots()
 }
 
 
-// Command 20: move one ordinary-stash slot into the Material Stash and put it back, to prove
+// Command 60: move one ordinary-stash slot into the Material Stash and put it back, to prove
 // the tab accepts a move at all. Writes what happened at each step, so a half-finished test is
 // visible rather than silent. This is a test command: nothing in the trainer's normal run
 // calls it.
@@ -3844,7 +3936,7 @@ static void RunStashPull(int32_t stashIndex)
 
 
 // ---------------------------------------------------------------------------------
-// Command 25: spawn one item. xo.vu.jzh(int itemKey, ulong uid, EItemGetSourceType source,
+// Command 65: spawn one item. xo.vu.jzh(int itemKey, ulong uid, EItemGetSourceType source,
 // int quantity, bool flag) returns an AddItemResult struct - ItemType, AddResult, ItemKey,
 // UniqueId, QuantityBefore, AddedQuantity - so the call says what it actually did.
 //
@@ -3941,7 +4033,7 @@ static void RunSpawnItem(int32_t itemKey, int32_t quantity)
 }
 
 // ---------------------------------------------------------------------------------
-// Command 26: watch the heroes while the speed is up.
+// Command 66: watch the heroes while the speed is up.
 //
 // Heroes die at 20x with god mode on and nothing so far explains it. God mode writes max HP
 // and current HP every frame, so either the writes stop landing, or something takes the hero
@@ -4064,15 +4156,14 @@ static void SpeedWatchTick()
     pos = ScanAppend(text, cap, pos,
         "speed       %s, requested %.2fx%s\r\n"
         "god mode    %s (%ld hits blocked)\r\n"
-        "one-hit     %s (%ld hits made lethal)\r\n"
+        "one-hit     %s\r\n"
         "frames      %d over %.1fs (%.1f fps, worst frame %.0f ms)\r\n",
         g_shared && g_shared->speedEnabled ? "ON" : "off",
         g_sw.watchScale > 0.0f ? g_sw.watchScale : (g_shared ? g_shared->timeScale : 0.0f),
         g_sw.watchScale > 0.0f ? " (set by this watch, past the 5x cap)" : "",
         g_godMode ? (g_origHeroDamage ? "ON" : "ON (HP writes only)") : "off",
         g_heroHitsBlocked,
-        g_oneHitKill ? (g_origMonsterDamage ? "ON" : "ON (1 HP writes only)") : "off",
-        g_monsterHitsAmplified,
+        g_oneHitKill ? "ON" : "off",
         g_sw.frames, g_sw.totalMs / 1000.0f,
         g_sw.totalMs > 0 ? g_sw.frames * 1000.0f / g_sw.totalMs : 0.0f,
         g_sw.worstFrameMs);
@@ -4487,10 +4578,24 @@ static void HookedSimUpdate(void* self, const void* method)
 // ---------------------------------------------------------------------------------
 static bool g_heroDamageTried = false;
 
+// The health controller holds its Unit at +0x30, and Unit.b_isHero is at +0x100.
+static bool HealthBelongsToHero(void* health)
+{
+    if (!health) return false;
+    void* unit = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(health) + 0x30);
+    if (!unit) return false;
+    return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(unit) + 0x100) != 0;
+}
+
 static void HookedHeroDamage(void* self, float damage, void* attacker, const void* method)
 {
+    // Only one of ours. pl overrides hby and calls this base implementation, so without this
+    // check god mode also made every monster immune and the heroes could not kill anything.
+    // Two tests, because each one fails differently: the flag read is structural but its
+    // offset was measured on 1.3.1, and the list is build-proof but only as fresh as the
+    // last god mode pass. Either one saying yes is enough.
     if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
-        IsHeroHealth(self))
+        (HealthBelongsToHero(self) || IsHeroHealth(self)))
     {
         InterlockedIncrement(&g_heroHitsBlocked);
         return;                      // the hero simply does not take the hit
@@ -4498,29 +4603,96 @@ static void HookedHeroDamage(void* self, float damage, void* attacker, const voi
     if (g_origHeroDamage) g_origHeroDamage(self, damage, attacker, method);
 }
 
-// Is this Unit one of ours? Unit.b_isHero sits at +0x100 on every build so far, and the hero
-// layout dump prints it, so a wrong answer here is visible rather than silent.
-static bool UnitIsHero(void* unit)
+// Verify the prologue, build a trampoline within reach, then swap the first 8 bytes in one
+// aligned store so the main thread never runs half a jump.
+// Patch `target` to jump to `replacement`, keeping a trampoline that runs the original
+// prologue and jumps back. The prologue is passed in because not every target shares one; it
+// is checked byte for byte first, so a function that has moved is refused rather than mangled.
+static bool InstallDetourAt(uint8_t* target, const uint8_t* prologue, size_t prologueLen,
+                            void* replacement, void** original)
 {
-    if (!unit) return false;
-    return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(unit) + 0x100) != 0;
-}
+    if (!target || prologueLen < 5 || prologueLen > 16) return false;
+    if (memcmp(target, prologue, prologueLen) != 0) return false;
+    if ((reinterpret_cast<uintptr_t>(target) & 7) != 0) return false;
 
-static const float kOneHitDamage = 1.0e9f;
+    uint8_t* stub = nullptr;
+    uintptr_t base = reinterpret_cast<uintptr_t>(target) & ~static_cast<uintptr_t>(0xFFFF);
+    for (uintptr_t delta = 0x10000; delta < 0x70000000 && !stub; delta += 0x10000)
+        for (int dir = -1; dir <= 1 && !stub; dir += 2)
+            stub = static_cast<uint8_t*>(VirtualAlloc(
+                reinterpret_cast<void*>(dir < 0 ? base - delta : base + delta), 0x1000,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!stub) return false;
 
-static void HookedMonsterDamage(void* self, float damage, void* attacker, const void* method)
-{
-    if (g_oneHitKill && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
-        UnitIsHero(attacker))
+    auto absJmp = [](uint8_t* at, const void* dest)
     {
-        InterlockedIncrement(&g_monsterHitsAmplified);
-        damage = kOneHitDamage;     // the game's own kill path still runs, so drops still drop
-    }
-    if (g_origMonsterDamage) g_origMonsterDamage(self, damage, attacker, method);
+        at[0] = 0xFF; at[1] = 0x25; memset(at + 2, 0, 4);
+        void* d = const_cast<void*>(dest);
+        memcpy(at + 6, &d, 8);
+    };
+    absJmp(stub, replacement);
+    uint8_t* tramp = stub + 32;
+    memcpy(tramp, prologue, prologueLen);
+    absJmp(tramp + prologueLen, target + prologueLen);
+
+    DWORD old = 0;
+    if (!VirtualProtect(target, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    *original = tramp;
+    // Start from what is there and overwrite only the prologue. Writing a fixed 8 bytes over a
+    // 6-byte prologue clobbers the instruction after it, and the trampoline then returns into
+    // the middle of it - which is exactly how this crashed the game.
+    uint8_t patch[8];
+    memcpy(patch, target, 8);
+    patch[0] = 0xE9;
+    int32_t rel = static_cast<int32_t>(stub - (target + 5));
+    memcpy(patch + 1, &rel, 4);
+    for (size_t i = 5; i < prologueLen && i < 8; ++i) patch[i] = 0x90;
+    int64_t value = 0;
+    memcpy(&value, patch, 8);
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(target), value);
+    VirtualProtect(target, 8, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, 8);
+    return true;
 }
 
-// Shared by both damage detours: verify the prologue, build a trampoline within reach, then
-// swap the first 8 bytes in one aligned store so the main thread never runs half a jump.
+// --- watching the chest drop chance -------------------------------------------------------
+// float mrl(this, float base, EContentType) at 0xB49FD0: what jeh rolls against.
+typedef float (*DropRateFn)(void* self, float base, int32_t content, const void* method);
+static DropRateFn g_origDropRate = nullptr;
+struct DropSample { float base, chance; int32_t content; };
+static DropSample g_dropSamples[8] = {};
+static volatile LONG g_dropSampleCount = 0;
+
+static float HookedDropRate(void* self, float base, int32_t content, const void* method)
+{
+    float chance = g_origDropRate ? g_origDropRate(self, base, content, method) : 0.0f;
+    // Keep the LAST eight, not the first: the first eight are recorded before anything is
+    // written and then never change, which makes a write look like it did nothing.
+    LONG n = InterlockedIncrement(&g_dropSampleCount) - 1;
+    LONG slot = n % 8;
+    g_dropSamples[slot].base = base;
+    g_dropSamples[slot].chance = chance;
+    g_dropSamples[slot].content = content;
+    return chance;
+}
+
+static bool InstallDropRateTap()
+{
+    static bool tried = false;
+    if (g_origDropRate) return true;
+    if (tried) return false;
+    tried = true;
+    // 0xB49FD0 is the drop helper on 1.3.1 and something else on every other build. The
+    // prologue check below is not enough on its own: push rbx; sub rsp,40h is common enough
+    // that another function would pass it and get patched.
+    if (!g_shared || g_shared->buildId != 10301) return false;
+    static const uint8_t kProl[6] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x40 };  // push rbx; sub rsp,40h
+    uint8_t* target = reinterpret_cast<uint8_t*>(g_gameAssembly) + 0xB49FD0;
+    return InstallDetourAt(target, kProl, sizeof(kProl),
+                           reinterpret_cast<void*>(&HookedDropRate),
+                           reinterpret_cast<void**>(&g_origDropRate));
+}
+
 static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* original)
 {
     if (*original) return true;
@@ -4569,17 +4741,6 @@ static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* or
     VirtualProtect(target, 8, old, &old);
     FlushInstructionCache(GetCurrentProcess(), target, 8);
     return true;
-}
-
-static bool InstallMonsterDamageHook()
-{
-    static bool tried = false;
-    if (g_origMonsterDamage) return true;
-    if (tried) return false;
-    tried = true;
-    return InstallDamageDetour(g_shared ? g_shared->rvaMonsterDamage : 0,
-                               reinterpret_cast<void*>(&HookedMonsterDamage),
-                               &g_origMonsterDamage);
 }
 
 static bool InstallHeroDamageHook()
@@ -4901,8 +5062,83 @@ static void RunCeilingProbe()
 }
 
 // Command 34. value 0 reports, value 1 raises every upgrade that has a known cap.
-static void RunAccountUpgrades(bool apply)
+// chestPerMille > 0 overrides the cap for the two chest drop-chance upgrades (ids 29 and 30);
+// 0 leaves them reporting only, as before.
+// Command 68: compare the AccountStatus the hook writes with the one the drop roll reads.
+static void RunAccountPointerCheck()
 {
+    char* text = g_heroScan->text;
+    const size_t cap = sizeof(g_heroScan->text);
+    memset(text, 0, cap);
+    size_t pos = ScanAppend(text, cap, 0, "=== AccountStatus pointer check ===\r\n");
+
+    if (!FindAccountManager())
+    {
+        pos = ScanAppend(text, cap, pos, "ERROR: %s\r\n", g_accError);
+        g_heroScan->length = static_cast<int32_t>(pos);
+        g_heroScan->done = -1;
+        return;
+    }
+
+    void* ours = nullptr;
+    il2cpp_field_get_value(g_acc.singleton, g_acc.statusField, &ours);
+
+    // The path StageManager.jeh takes: a class pointer in a global, its static fields, the
+    // first of those, then +0x20.
+    // Walking raw pointers out of a global crashed the game once: a null check is not enough
+    // when the global holds something that is not a pointer yet. Every hop is probed first.
+    auto readPtr = [](void* at, void** out) -> bool
+    {
+        if (!at) return false;
+        __try { *out = *reinterpret_cast<void**>(at); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        // Anything that is not a plausible user-mode heap pointer is not followed.
+        uintptr_t v = reinterpret_cast<uintptr_t>(*out);
+        return v > 0x10000 && v < 0x7FFFFFFFFFFF && (v & 7) == 0;
+    };
+
+    // Also a 1.3.1 address, so the walk only runs there.
+    uint8_t* base = (g_shared && g_shared->buildId == 10301)
+                        ? reinterpret_cast<uint8_t*>(g_gameAssembly) : nullptr;
+    void* theirs = nullptr;
+    void* klass = nullptr; void* statics = nullptr; void* owner = nullptr;
+    if (base && readPtr(base + 0x6185378, &klass) &&
+        readPtr(reinterpret_cast<uint8_t*>(klass) + 0xB8, &statics) &&
+        readPtr(statics, &owner))
+    {
+        readPtr(reinterpret_cast<uint8_t*>(owner) + 0x20, &theirs);
+    }
+
+    pos = ScanAppend(text, cap, pos, "hook writes to  %p\r\n", ours);
+    pos = ScanAppend(text, cap, pos, "drop roll reads %p   (klass %p, statics %p, owner %p)\r\n",
+                     theirs, klass, statics, owner);
+
+    // Read upgrade 29 through each, so a mismatch is shown rather than asserted.
+    // Only the instance we already own is safe to call into. Invoking a getter on the other
+    // pointer hung the request once - it is derived from a raw walk, so it is compared, not
+    // called.
+    int32_t a = 0, b = 0;
+    bool okA = ReadAccountValue(ours, 29, &a);
+    bool okB = false;
+    if (okA) pos = ScanAppend(text, cap, pos, "upgrade 29 via ours   = %d\r\n", a);
+    else     pos = ScanAppend(text, cap, pos, "upgrade 29 via ours   = unreadable\r\n");
+    if (okB) pos = ScanAppend(text, cap, pos, "upgrade 29 via theirs = %d\r\n", b);
+    else     pos = ScanAppend(text, cap, pos, "upgrade 29 via theirs = unreadable\r\n");
+    pos = ScanAppend(text, cap, pos, "\r\n%s\r\n",
+                     (ours && theirs && ours == theirs)
+                         ? "SAME object - the write does reach the drop formula."
+                         : "DIFFERENT objects - the write never reaches the drop formula.");
+
+    g_heroScan->length = static_cast<int32_t>(pos);
+    g_heroScan->done = 1;
+}
+
+static void RunAccountUpgrades(bool apply, int32_t chestPerMille)
+{
+    for (int i = 0; i < kAccountUpgradeCount; ++i)
+        if (g_accountUpgrades[i].id == 29 || g_accountUpgrades[i].id == 30)
+            g_accountUpgrades[i].cap = chestPerMille > 0 ? chestPerMille : 0;
+
     char* text = g_heroScan->text;
     const size_t cap = sizeof(g_heroScan->text);
     size_t pos = ScanAppend(text, cap, 0, "=== Chest upgrades (the game's own account values) ===\r\n");
@@ -5207,16 +5443,10 @@ static void RunHeroCommand()
         // the answer says whether it took: without it, heroes are only as safe as the next
         // frame boundary, which at 20x can be ten seconds of game time away.
         bool godOn = g_heroScan->command == 13 && on;
-        bool killOn = g_heroScan->command == 12 && on;
-        bool hooked = godOn  ? InstallHeroDamageHook()
-                    : killOn ? InstallMonsterDamageHook()
-                             : false;
+        bool hooked = godOn ? InstallHeroDamageHook() : false;
         const char* note =
-            godOn  ? (hooked ? " - damage blocked at the source"
-                             : " - WARNING: damage hook did not install, HP writes only")
-          : killOn ? (hooked ? " - the hero's own hit is made lethal"
-                             : " - WARNING: damage hook did not install, 1 HP writes only")
-                   : "";
+            godOn ? (hooked ? " - damage blocked at the source"
+                            : " - WARNING: damage hook did not install, HP writes only") : "";
         size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: %s %s%s\r\n",
             g_heroScan->command == 12 ? "One-hit kill" : "God mode", on ? "ON" : "OFF", note);
         g_heroScan->length = static_cast<int32_t>(n);
@@ -5238,6 +5468,7 @@ static void RunHeroCommand()
             locks.attackSpeedValue = kMaxAttackSpeed;
             for (int i = 0; i < kExtraStatCount; ++i)
             {
+                if (!kExtraStats[i].inMaxStats) continue;   // left to the Hero Stats tab
                 locks.extra[i] = on;
                 locks.extraValue[i] = kExtraStats[i].maxValue;
             }
@@ -5250,8 +5481,9 @@ static void RunHeroCommand()
                 "OK: Max stats ON for all 3 heroes - Attack Damage %.6g, Attack Speed %.6g",
                 kMaxAttackDamage, kMaxAttackSpeed);
             for (int i = 0; i < kExtraStatCount; ++i)
-                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n, ", %s %.6g",
-                    kExtraStats[i].name, kExtraStats[i].maxValue);
+                if (kExtraStats[i].inMaxStats)
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n, ", %s %.6g",
+                        kExtraStats[i].name, kExtraStats[i].maxValue);
             n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
                 " (re-applied every ~0.2s, also to heroes that spawn or revive later)\r\n");
         }
@@ -5537,8 +5769,27 @@ static void RunHeroScan()
         { 0x27C, 0x278, "Multistrike",              kStatInt,      0 },
         { 0x29C, 0,     "BlockChance",              kStatFloat,    0 },
         { 0x2A0, 0,     "ElementalBlockChance",     kStatFloat,    0 },
+        // Unidentified. Printed so they can be matched against the in-game stat panel rather
+        // than guessed at: StatType lists 82 stats and these are the only Unit slots left for
+        // HP regen, life leech, HP per hit/kill, max dodge, max block and gold.
+        { 0x1F4, 0,     "unknown +0x1F4 (int)",     kStatObscuredInt, 0 },
+        { 0x268, 0,     "unknown +0x268",           kStatFloat,    0 },
+        { 0x270, 0,     "unknown +0x270",           kStatFloat,    0 },
+        { 0x278, 0,     "unknown +0x278 (int)",     kStatInt,      0 },
+        { 0x298, 0,     "unknown +0x298 (int)",     kStatInt,      0 },
+        { 0x2A4, 0,     "unknown +0x2A4",           kStatFloat,    0 },
         // Dictionary<EDamageAttribute, float> at +0x260, so these four read through the
         // dictionary - printed here to compare what we write against what the game shows.
+        // Read back out of the hero stat dictionary, so a write that silently did nothing is
+        // visible instead of being taken on trust from the lock count.
+        { 18,    0,     "MaxDodgeChance",           kStatDict,     0 },
+        { 19,    0,     "MaxBlockChance",           kStatDict,     0 },
+        { 61,    0,     "ElementalDodgeChance",     kStatDict,     0 },
+        { 21,    0,     "HpLeech",                  kStatDict,     0 },
+        { 23,    0,     "HpRegenPerSec",            kStatDict,     0 },
+        { 33,    0,     "AddHpPerHit",              kStatDict,     0 },
+        { 58,    0,     "AddHpPerKill",             kStatDict,     0 },
+        { 74,    0,     "GoldAmount",               kStatDict,     0 },
         { 1,     0,     "FireResistance",           kStatResist,   0 },
         { 2,     0,     "ColdResistance",           kStatResist,   0 },
         { 3,     0,     "LightningResistance",      kStatResist,   0 },
@@ -5886,7 +6137,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 g_heroScan->length = 0;
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
                 if (g_heroScan->value == 2.0f) RunCeilingProbe();
-                else RunAccountUpgrades(g_heroScan->value != 0.0f);
+                else RunAccountUpgrades(g_heroScan->value != 0.0f, g_heroScan->heroIndex);
             }
             else if (g_heroScan->command == 31)
             {
@@ -5895,7 +6146,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
                 RunSelfCheck();
             }
-            else if (g_heroScan->command == 25 || g_heroScan->command == 26)
+            else if (g_heroScan->command == 65 || g_heroScan->command == 66)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5907,7 +6158,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                         "ERROR: could not install the per-frame hook on this build.\r\n"));
                     g_heroScan->done = -1;
                 }
-                else if (g_heroScan->command == 25)
+                else if (g_heroScan->command == 65)
                 {
                     InterlockedExchange(&g_spawnDone, 0);
                     InterlockedExchange(&g_spawnCount, static_cast<LONG>(g_heroScan->value));
@@ -5941,7 +6192,35 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     if (!g_speedWatchDone) g_speedWatchEnd = 0;
                 }
             }
-            else if (g_heroScan->command == 27)
+            else if (g_heroScan->command == 69)
+            {
+                g_heroScan->done = 0;
+                memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
+                size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0,
+                    "=== chest drop chance tap ===\r\n");
+                bool on = InstallDropRateTap();
+                n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                    on ? "tap installed; %ld call(s) seen so far\r\n"
+                       : "could not install the tap (prologue did not match)\r\n",
+                    g_dropSampleCount);
+                LONG shown = g_dropSampleCount < 8 ? g_dropSampleCount : 8;
+                for (LONG i = 0; i < shown; ++i)   // the most recent calls
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                        "  base=%.6g  content=%d  ->  chance=%.6g\r\n",
+                        g_dropSamples[i].base, g_dropSamples[i].content, g_dropSamples[i].chance);
+                if (on && g_dropSampleCount == 0)
+                    n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), n,
+                        "  nothing yet - kill something and ask again.\r\n");
+                g_heroScan->length = static_cast<int32_t>(n);
+                g_heroScan->done = 1;
+            }
+            else if (g_heroScan->command == 68)
+            {
+                g_heroScan->done = 0;
+                g_heroScan->length = 0;
+                RunAccountPointerCheck();
+            }
+            else if (g_heroScan->command == 67)
             {
                 // Re-arm the Material Stash probe. Costs one duplicated item if the game still
                 // adds without consuming, which is why it is a deliberate command.
@@ -5954,13 +6233,13 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     "and the tab switches itself off again.\r\n"));
                 g_heroScan->done = 1;
             }
-            else if (g_heroScan->command == 24)
+            else if (g_heroScan->command == 64)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
                 RunItemSearch();        // reads its query out of the text buffer first
             }
-            else if (g_heroScan->command == 23)
+            else if (g_heroScan->command == 63)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5975,7 +6254,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     if (!g_matPullDone) InterlockedExchange(&g_matPullSlot, -1);
                 }
             }
-            else if (g_heroScan->command == 21 || g_heroScan->command == 22)
+            else if (g_heroScan->command == 61 || g_heroScan->command == 62)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
@@ -5992,7 +6271,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     InterlockedExchange(&g_matAddDone, 0);
                     InterlockedExchange(&g_matAddWhich, static_cast<LONG>(g_heroScan->value));
                     InterlockedExchange(&g_matAddSrc,
-                                        g_heroScan->command == 22 ? kSlotInventory : kSlotStash);
+                                        g_heroScan->command == 62 ? kSlotInventory : kSlotStash);
                     InterlockedExchange(&g_matAddSlot, g_heroScan->heroIndex);
                     for (int waited = 0; !g_matAddDone && waited < 20000; waited += 50) Sleep(50);
                     if (!g_matAddDone)
@@ -6006,7 +6285,7 @@ static DWORD WINAPI WorkerThread(LPVOID)
                     else g_heroScan->done = g_matAddDone;
                 }
             }
-            else if (g_heroScan->command == 20)
+            else if (g_heroScan->command == 60)
             {
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;

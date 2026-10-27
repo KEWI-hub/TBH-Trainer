@@ -42,7 +42,9 @@ internal sealed class MainForm : Form
     private CheckBox _chkAutoOpenBoxes = null!;
     private CheckBox _chkBagToStash = null!;
     private Button _btnBagToStashNow = null!;
-    private Button _btnChestUpgrades = null!;
+    // The Chest upgrades button is gone: writing the drop-chance upgrade up to +1,000,000%
+    // measured the same as leaving it alone. `do chestupgrades` and `do chestread` still work
+    // through the debug channel if it is ever worth re-testing.
     private Button _btnChestLog = null!;
     private Button _btnStashList = null!;
     private Button _btnSlotProbe = null!;
@@ -385,6 +387,12 @@ internal sealed class MainForm : Form
         BuildHeroStatsTab(tabHeroes);
         DetectInstalledBuild();
 
+        // Watch the channel rather than trusting it. Writes to a dead view are accepted
+        // silently, which is indistinguishable from the trainer hanging.
+        _bridgeWatch = new System.Windows.Forms.Timer { Interval = 4000 };
+        _bridgeWatch.Tick += (_, _) => CheckBridgeAlive();
+        _bridgeWatch.Start();
+
         Log("Trainer ready.");
         Log("ACTK BYPASS tab: offsets per build — see README.md if a hotfix broke features.");
 
@@ -482,9 +490,6 @@ internal sealed class MainForm : Form
         _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
         _btnBagToStashNow.Enabled = false;
         _btnBagToStashNow.Click += (_, _) => OnBagToStashNow();
-        _btnChestUpgrades = MakeBtn("Chest upgrades", 175, 56, 140);
-        _btnChestUpgrades.Enabled = false;
-        _btnChestUpgrades.Click += (_, _) => OnChestUpgrades();
         _btnChestLog = MakeBtn("Chest log", 325, 56, 120);
         _btnChestLog.Enabled = false;
         _btnChestLog.Click += (_, _) => OnChestLog();
@@ -510,7 +515,7 @@ internal sealed class MainForm : Form
         _btnMetaDump.Enabled = false;
         _btnMetaDump.Click += (_, _) => OnMetadataDump();
 
-        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestUpgrades, _btnChestLog, _btnStashList, _btnSlotProbe, _btnMatMoveTest, _btnMetaDump });
+        grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestLog, _btnStashList, _btnSlotProbe, _btnMatMoveTest, _btnMetaDump });
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -716,6 +721,38 @@ internal sealed class MainForm : Form
     // measure: AppendText is not subject to it, so the old log was never actually truncated.)
     private const int LogTrimAt = 24000;
 
+    private System.Windows.Forms.Timer? _bridgeWatch;
+    private bool _bridgeWasAlive;
+
+    /// <summary>
+    /// Says it out loud when the channel to the hook dies, and reconnects if the game is still
+    /// there. Without this the buttons stay enabled and do nothing.
+    /// </summary>
+    private void CheckBridgeAlive()
+    {
+        if (!_bridge.IsConnected) { _bridgeWasAlive = false; return; }
+
+        bool alive = _bridge.IsAlive();
+        if (alive) { _bridgeWasAlive = true; return; }
+        if (!_bridgeWasAlive) return;          // already reported; do not repeat every tick
+
+        _bridgeWasAlive = false;
+        Log("WARNING: the hook stopped answering - the game was probably restarted.");
+        _bridge.Drop();
+        _injected = false;
+
+        bool gameGone = true;
+        try { gameGone = _pid < 0 || Process.GetProcessById(_pid).HasExited; } catch { }
+        Log(gameGone
+            ? "  Press Connect once the game is running again."
+            : "  Reconnecting...");
+        if (!gameGone && EnsureSpeedReady())
+        {
+            Log("  Reconnected.");
+            _bridgeWasAlive = true;
+        }
+    }
+
     private DebugServer? _debug;
 
     /// <summary>
@@ -749,9 +786,13 @@ internal sealed class MainForm : Form
             case "help":
             default:
                 return "commands: ping | log [lines] | status | do <action> | help\n" +
-                       "actions:  attach bypass bagstash chestlog chestupgrades scanheroes " +
-                       "maxstats clearmax selfcheck herolayout invscan stashlist\n" +
-                       "          finditem <name> | spawn <key> [n] | speedwatch [secs]";
+                       "actions:\n" +
+                       "  game     attach | bypass | onehit on|off | godmode on|off\n" +
+                       "  heroes   maxstats | clearmax | scanheroes | herolayout\n" +
+                       "  items    bagstash | invscan | stashlist | finditem <name> | spawn <key> [n]\n" +
+                       "  chests   chestlog | chestupgrades | chestread\n" +
+                       "  checks   selfcheck | speedwatch [secs] [speed]\n" +
+                       "  material pull <stashSlot> | mattest <slot> | matadd <slot> [1|2] [bag]";
         }
     }
 
@@ -788,6 +829,24 @@ internal sealed class MainForm : Form
             case "bagstash":      OnBagToStashNow();      return "bag -> stash requested";
             case "chestlog":      OnChestLog();           return "chest log requested";
             case "chestupgrades": OnChestUpgrades();      return "chest upgrades requested";
+            case "droptap":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(69, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
+            case "accptr":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(68, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
+            case "chestread":
+            {
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                return _heroScanBridge.WriteValue(34, 0, 0f, timeoutMs: 15000)?.Trim() ?? "timed out";
+            }
             case "scanheroes":    OnScanHeroes(this, EventArgs.Empty); return "hero scan requested";
             case "maxstats":      OnMaxHeroStats(true);   return "max stats requested";
             case "clearmax":      OnMaxHeroStats(false);  return "clear max requested";
@@ -796,7 +855,7 @@ internal sealed class MainForm : Form
             case "invscan":       RunInventoryScan();     return "inventory scan requested";
             case "matadd":
             {
-                // Command 21: offer one stash slot to a Material Stash adder candidate.
+                // Command 61: offer one stash slot to a Material Stash adder candidate.
                 // "do matadd <stash slot> [1|2]" - 1 = kbx, 2 = kby.
                 string[] a = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (a.Length < 1 || !int.TryParse(a[0], out int mslot) || mslot < 0)
@@ -804,9 +863,9 @@ internal sealed class MainForm : Form
                 int which = a.Length > 1 && int.TryParse(a[1], out int w) ? w : 1;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                // 21 = the slot is in the stash, 22 = it is in the bag.
+                // 61 = the slot is in the stash, 62 = it is in the bag.
                 bool fromBag = a.Length > 2 && a[2].Equals("bag", StringComparison.OrdinalIgnoreCase);
-                return _heroScanBridge.WriteValue(fromBag ? 22 : 21, mslot, which, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(fromBag ? 62 : 61, mslot, which, timeoutMs: 30000)?.Trim()
                        ?? "material stash adder test timed out";
             }
             case "finditem":
@@ -829,12 +888,12 @@ internal sealed class MainForm : Form
                 int count = sp.Length > 1 && int.TryParse(sp[1], out int c) ? c : 1;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(25, spawnKey, count, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(65, spawnKey, count, timeoutMs: 30000)?.Trim()
                        ?? "spawn timed out";
             }
             case "speedwatch":
             {
-                // Command 26: sample the heroes for N seconds while the speed is up.
+                // Command 66: sample the heroes for N seconds while the speed is up.
                 // "do speedwatch <secs> [speed]". A speed given here is driven by the hook for
                 // the watch window only, so the 20x failure can be reproduced on purpose.
                 string[] sw = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -842,33 +901,45 @@ internal sealed class MainForm : Form
                 int speed = sw.Length > 1 && int.TryParse(sw[1], out int sp) && sp > 0 ? sp : 0;
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(26, speed, secs, timeoutMs: (secs + 25) * 1000)?.Trim()
+                return _heroScanBridge.WriteValue(66, speed, secs, timeoutMs: (secs + 25) * 1000)?.Trim()
                        ?? "speed watch timed out";
             }
             case "itemsearch":
             {
-                // Command 24: search the game's item database by name or key.
+                // Command 64: search the game's item database by name or key.
                 if (arg.Length == 0) return "usage: do itemsearch <name or key>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.RunQuery(24, arg)?.Trim() ?? "item search timed out";
+                return _heroScanBridge.RunQuery(64, arg)?.Trim() ?? "item search timed out";
+            }
+            case "onehit":
+            case "godmode":
+            {
+                // Commands 12 and 13. Needed to tell whether a symptom belongs to a feature:
+                // turning one off and watching is the only honest way to attribute it.
+                bool want = !arg.Equals("off", StringComparison.OrdinalIgnoreCase);
+                _heroScanBridge ??= new HeroScanBridge();
+                if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
+                int cmd = verb == "onehit" ? 12 : 13;
+                return _heroScanBridge.WriteValue(cmd, 0, want ? 1f : 0f, timeoutMs: 15000)?.Trim()
+                       ?? "toggle timed out";
             }
             case "pull":
             {
-                // Command 23: move one stash slot into the first free bag slot.
+                // Command 63: move one stash slot into the first free bag slot.
                 if (!int.TryParse(arg, out int pslot) || pslot < 0) return "usage: do pull <stash slot>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(23, pslot, 0f, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(63, pslot, 0f, timeoutMs: 30000)?.Trim()
                        ?? "pull timed out";
             }
             case "mattest":
             {
-                // Command 20: move one stash slot into the Material Stash and straight back.
+                // Command 60: move one stash slot into the Material Stash and straight back.
                 if (!int.TryParse(arg, out int slot) || slot < 0) return "usage: do mattest <stash slot>";
                 _heroScanBridge ??= new HeroScanBridge();
                 if (!_heroScanBridge.TryConnect(3000)) return "hook channel missing";
-                return _heroScanBridge.WriteValue(20, slot, 0f, timeoutMs: 30000)?.Trim()
+                return _heroScanBridge.WriteValue(60, slot, 0f, timeoutMs: 30000)?.Trim()
                        ?? "material stash test timed out";
             }
             case "stashlist":
@@ -1186,7 +1257,6 @@ internal sealed class MainForm : Form
     private void SetGameApiControlsEnabled(bool enabled)
     {
         _btnBagToStashNow.Enabled = enabled && _buildProfile.SlotMoveRva > 0;
-        _btnChestUpgrades.Enabled = enabled && _buildProfile.AccStatusGetRva > 0;
         _btnChestLog.Enabled = enabled && _buildProfile.BoxCountRva > 0;
         _btnStashList.Enabled = enabled && _buildProfile.SlotUidRva > 0;
         _btnSlotProbe.Enabled = enabled;
@@ -1210,15 +1280,9 @@ internal sealed class MainForm : Form
             Log("  … (see saved file for full list)");
     }
 
-    // HP stays exact as a float up to 2^24; Attack Speed above ~50 gains nothing at 60 fps.
-    private const float AutoHeroHpValue = 2_000_000_000f;
-    private const float AutoHeroAttackSpeedValue = 50f;
-    // Unit stats are stored as ratios: live heroes show crit chance 0.03-0.37 (1.0 = 100%),
-    // crit damage 3-8x and cooldown reduction up to ~1.8. No cap exists in the data tables,
-    // so these stay well above live values without pushing cooldowns towards zero.
-    private const float AutoHeroCritChanceValue = 1f;
-    private const float AutoHeroCritDamageValue = 100f;
-    private const float AutoHeroCdrValue = 10f;
+    // The five values the auto setup used to write by hand are gone: it applies Max stats now,
+    // which covers them and the stats they left out. The hook owns those numbers (kMaxAttackDamage
+    // and friends in dllmain.cpp), so there is one place to change them instead of two.
     // Live armor is ~9k-90k; stay under the hook's 1e7 re-apply sanity limit.
     private const float GodModeArmorValue = 5_000_000f;
 
@@ -1237,23 +1301,14 @@ internal sealed class MainForm : Form
             return;
         }
 
-        Log($"--- Auto hero lock: HP = {AutoHeroHpValue:N0}, Attack Speed = {Fmt(AutoHeroAttackSpeedValue)}, " +
-            $"Crit Chance = {Fmt(AutoHeroCritChanceValue)}, Crit Damage = {Fmt(AutoHeroCritDamageValue)}, CDR = {Fmt(AutoHeroCdrValue)} ---");
+        Log("--- Auto hero lock: Max stats on every hero ---");
         OnScanHeroes(null, EventArgs.Empty);
 
-        for (int hero = 0; hero < _cmbHeroIndex.Items.Count; hero++)
-        {
-            // 5 = HP, 4 = Attack Speed, 8 = Crit Chance, 9 = Crit Damage, 10 = CDR
-            foreach (var (command, value) in new[]
-                     {
-                         (5, AutoHeroHpValue), (4, AutoHeroAttackSpeedValue),
-                         (8, AutoHeroCritChanceValue), (9, AutoHeroCritDamageValue), (10, AutoHeroCdrValue),
-                     })
-            {
-                string? result = _heroScanBridge.WriteValue(command, hero, value);
-                Log("  " + (result?.Trim() ?? $"ERROR: Hero {hero + 1} write timed out."));
-            }
-        }
+        // Max stats rather than the five locks this used to write. Those left Skill Range at 0,
+        // and without reach the heroes never land the killing blow: the stranded-monster handler
+        // does it for them, thousands of times an hour. Measured overnight with Max stats on,
+        // 90% of 393,171 kills were the heroes' own; the night before it was none of them.
+        OnMaxHeroStats(true);
         Log("Auto hero lock done. Locks re-apply every ~0.2s (also to heroes that spawn or revive later); use \"Clear Hero Locks\" to release.");
 
         if (_chkOneHitKill.Checked) ApplyCombatToggle(12, true);
@@ -1332,17 +1387,12 @@ internal sealed class MainForm : Form
             Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
             return;
         }
-        _btnChestUpgrades.Enabled = false;
-        try
-        {
-            Log("--- Chest upgrades ---");
-            string? result = _heroScanBridge.WriteValue(34, 0, 1f, timeoutMs: 15000);
-            Log(result?.Trim() ?? "ERROR: the hook did not answer.");
-        }
-        finally
-        {
-            _btnChestUpgrades.Enabled = true;
-        }
+        // No picker any more - the button is gone and the debug channel is the only caller.
+        // +1,000% is where the account was left; raising it further measured the same.
+        const int perMille = 10_000;
+        Log($"--- Chest upgrades: writing drop chance {perMille} (= +{perMille / 10.0:N0}%) ---");
+        string? result = _heroScanBridge.WriteValue(34, perMille, 1f, timeoutMs: 15000);
+        Log(result?.Trim() ?? "ERROR: the hook did not answer.");
     }
 
     /// <summary>
@@ -1434,7 +1484,7 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// Command 24: sets every hero stat in the list to its maximum stable value on all
+    /// Command 64: sets every hero stat in the list to its maximum stable value on all
     /// three hero slots and keeps it locked (the hook re-applies it every ~0.2s, so heroes
     /// that spawn or revive later get it too). <paramref name="on"/> false releases them.
     /// </summary>
