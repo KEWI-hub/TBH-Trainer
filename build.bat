@@ -8,7 +8,7 @@ echo ========================================
 echo.
 
 pushd TBHHook
-call build.bat
+call .\build.bat
 if errorlevel 1 (
     popd
     echo.
@@ -18,7 +18,7 @@ if errorlevel 1 (
 popd
 
 pushd TBH_Trainer
-call build.bat
+call .\build.bat
 if errorlevel 1 (
     popd
     echo.
@@ -33,11 +33,11 @@ REM Keep TBHHook\TBHHook.dll because the trainer project copies it on publish.
 if exist TBHHook\dllmain.obj del /Q TBHHook\dllmain.obj
 if not exist TrainerBuild mkdir TrainerBuild
 copy /Y "TBHHook\TBHHook.dll" "TrainerBuild\TBHHook.dll" >nul
-copy /Y "publish\TBH Trainer.exe" "TrainerBuild\TBH Trainer.exe" >nul
+copy /Y "publish\KEWI_TBH.exe" "TrainerBuild\KEWI_TBH.exe" >nul
 copy /Y "publish\TBHHook.dll" "TrainerBuild\TBHHook.dll" >nul 2>nul
 
 echo.
 echo ALL BUILD OK
 echo Output: publish\ and TrainerBuild\
-echo Launch: TrainerBuild\TBH Trainer.exe
+echo Launch: TrainerBuild\KEWI_TBH.exe
 endlocal

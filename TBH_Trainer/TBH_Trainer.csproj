@@ -8,6 +8,8 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>TBH_Trainer</RootNamespace>
     <AssemblyName>KEWI_TBH</AssemblyName>
+    <!-- Keep in step with AppInfo.Version, which drives the update check. -->
+    <Version>3.0.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <!-- Footprint: the trainer idles next to the game, so it should not keep a background GC

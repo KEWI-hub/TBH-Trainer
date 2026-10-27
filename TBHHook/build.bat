@@ -47,3 +47,4 @@ if errorlevel 1 (
 )
 echo BUILD OK - TBHHook.dll copied to TrainerBuild
 endlocal
+exit /b 0

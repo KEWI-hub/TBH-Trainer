@@ -57,3 +57,4 @@ echo.
 echo BUILD OK
 echo Run: ..\TrainerBuild\KEWI_TBH.exe
 endlocal
+exit /b 0
