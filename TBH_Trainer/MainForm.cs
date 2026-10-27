@@ -20,6 +20,13 @@ internal sealed class MainForm : Form
     private Button _btnBypass = null!;
     private Label _lblBypassStatus = null!;
 
+    /// <summary>Left edge of the Ko-fi link; the header tag line has to stop before it.</summary>
+    private const int KofiLeft = 424;
+
+    private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 120 };
+    private GroupBox _grpSpeed = null!;
+    private GroupBox _grpBoxes = null!;
+
     private CheckBox _chkSpeed = null!;
     private Panel _pnlSpeed = null!;
     private TrackBar _trkSpeed = null!;
@@ -296,6 +303,23 @@ internal sealed class MainForm : Form
         catch { return null; }
     }
 
+    /// <summary>
+    /// Opens centred on DISPLAY1 rather than on the primary monitor. The trainer runs elevated,
+    /// so nothing outside it can move its window afterwards - UIPI refuses SetWindowPos from a
+    /// process at a lower integrity level - which makes the starting position the only one it
+    /// will ever have. Falls back to the primary monitor on a single-screen machine.
+    /// </summary>
+    private void PlaceOnFirstMonitor()
+    {
+        var screen = Array.Find(Screen.AllScreens,
+                         s => s.DeviceName.EndsWith("DISPLAY1", StringComparison.OrdinalIgnoreCase))
+                     ?? Screen.PrimaryScreen;
+        if (screen == null) return;
+        var area = screen.WorkingArea;
+        Location = new Point(area.X + Math.Max(0, (area.Width - Width) / 2),
+                             area.Y + Math.Max(0, (area.Height - Height) / 2));
+    }
+
     private void InitializeComponent()
     {
         Text = $"KEWI_TBH v{AppInfo.Version}";
@@ -303,11 +327,13 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         AutoScaleMode = AutoScaleMode.None;
-        StartPosition = FormStartPosition.CenterScreen;
+        StartPosition = FormStartPosition.Manual;   // see PlaceOnFirstMonitor
         BackColor = BgForm;
         ForeColor = TextMain;
         Font = new Font("Segoe UI", 9.5f);
         try { Icon = LoadEmbedded<Icon>("icon.ico"); } catch { }
+
+        PlaceOnFirstMonitor();
 
         _header = new Panel { Location = new Point(0, 0), Size = new Size(584, 76), BackColor = BgForm };
         _header.Paint += PaintHeader;
@@ -316,7 +342,7 @@ internal sealed class MainForm : Form
         var lnkKofi = new LinkLabel
         {
             Text = "☕ Support on Ko-fi",
-            Location = new Point(424, 52), AutoSize = true,
+            Location = new Point(KofiLeft, 52), AutoSize = true,
             Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
             LinkColor = AccentCyan, ActiveLinkColor = AccentPurp, VisitedLinkColor = AccentCyan,
             LinkBehavior = LinkBehavior.HoverUnderline,
@@ -428,7 +454,8 @@ internal sealed class MainForm : Form
         grp2.Controls.AddRange(new Control[] { _btnBypass, _lblBypassStatus });
 
         // === 3. Game Speed (Speedhack) ===
-        var grp3 = MakeGroup(page, "3. Game Speed (Speedhack)", ref y, 140);
+        _grpSpeed = MakeGroup(page, "3. Game Speed (Speedhack)", ref y, 140);
+        var grp3 = _grpSpeed;
         _chkSpeed = new CheckBox
         {
             Text = "Enable Speedhack", Location = new Point(15, 24), AutoSize = true,
@@ -463,7 +490,9 @@ internal sealed class MainForm : Form
         grp3.Controls.Add(_pnlSpeed);
 
         // === 4. Boxes & Stash (TBHHook + il2cpp) ===
-        var grp6 = MakeGroup(page, "4. Boxes & Stash", ref y, 95);   // two rows; the debug buttons under them are hidden
+        // "&&" because a lone & in a GroupBox caption is read as a keyboard mnemonic and eaten.
+        _grpBoxes = MakeGroup(page, "4. Boxes && Stash", ref y, 95);
+        var grp6 = _grpBoxes;
 
         // Opens stage boxes one at a time: box found -> wait 2s -> open -> 2s -> next.
         _chkAutoOpenBoxes = new CheckBox
@@ -479,9 +508,14 @@ internal sealed class MainForm : Form
         // kept at level 90+ and lower gear stays in the bag.
         _chkBagToStash = new CheckBox
         {
-            Text = "Bag → stash when full (materials → Material Stash, gear 90+)", Location = new Point(230, 26), AutoSize = true,
+            Text = "Bag → stash when full", Location = new Point(230, 26), AutoSize = true,
             ForeColor = TextMain, Checked = true
         };
+        // The rules are too long for the caption, which ran past the edge of the group.
+        _tips.SetToolTip(_chkBagToStash,
+            "Materials go to the Material Stash tab (DLC) through the game's own move handler,"
+            + "\r\nand to the ordinary stash when the tab is not owned or turns a material away."
+            + "\r\nGear is only kept at level 90+; lower gear stays in the bag.");
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
 
         _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
@@ -518,6 +552,22 @@ internal sealed class MainForm : Form
         _btnMetaDump.Click += (_, _) => OnMetadataDump();
 
         grp6.Controls.AddRange(new Control[] { _chkAutoOpenBoxes, _chkBagToStash, _btnBagToStashNow, _btnChestLog, _btnStashList, _btnSlotProbe, _btnMatMoveTest, _btnMetaDump });
+
+        LayoutSpeedGroup();   // starts unticked, so the speed box starts collapsed
+    }
+
+    /// <summary>
+    /// The speed controls are only shown while Speedhack is on, and the group was left at its
+    /// full height either way, so an empty box sat between sections 2 and 4. It now shrinks to
+    /// the checkbox and section 4 follows it up.
+    /// </summary>
+    private void LayoutSpeedGroup()
+    {
+        const int open = 140, shut = 52;
+        int want = _chkSpeed.Checked ? open : shut;
+        if (_grpSpeed.Height == want) return;
+        _grpBoxes.Top += want - _grpSpeed.Height;
+        _grpSpeed.Height = want;
     }
 
     /// <summary>Finds the installed GameAssembly.dll and its build for the startup version pop-up.</summary>
@@ -709,9 +759,17 @@ internal sealed class MainForm : Form
             g.DrawString("_TBH", subFont, db, tx + dw - 10, 20);
 
         using var tagFont = new Font("Segoe UI", 8.5f);
+        // The Ko-fi link sits on this line too, so the tag has to end before it. The long form
+        // is drawn when it fits and the short one otherwise, rather than being cut off mid-word
+        // the way the full build list was.
+        int room = KofiLeft - tx - 10;
+        string tag = $"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.3.2   •   ACTk + Speed + Hero + Stash";
+        if (g.MeasureString(tag, tagFont).Width > room)
+            tag = "Taskbar Hero 1.00.08–1.3.2   •   ACTk + Speed + Hero + Stash";
+        if (g.MeasureString(tag, tagFont).Width > room)
+            tag = "ACTk + Speed + Hero + Stash";
         using (var tg = new SolidBrush(Color.FromArgb(120, 125, 142)))
-            g.DrawString($"Taskbar Hero 1.00.08–1.00.09, 1.2.4–1.3.2   •   v{AppInfo.Version}   •   ACTk + Speed + Hero + Stash",
-                tagFont, tg, tx, 50);
+            g.DrawString(tag, tagFont, tg, tx, 50);
 
         using var pen = new Pen(AccentCyan, 2);
         g.DrawLine(pen, 0, rect.Height - 2, rect.Width, rect.Height - 2);
@@ -1687,6 +1745,7 @@ internal sealed class MainForm : Form
                 return;
             }
             _pnlSpeed.Visible = true;
+            LayoutSpeedGroup();
             // Ticking the box means "go fast": it opens at the ceiling rather than at whatever
             // the slider was last left on. The slider is still there to come back down.
             ShowSpeed(MaxSpeed);
@@ -1697,6 +1756,7 @@ internal sealed class MainForm : Form
         else
         {
             _pnlSpeed.Visible = false;
+            LayoutSpeedGroup();
             // Put the controls back to 1x as well, so the next tick starts from a known place
             // rather than showing a number the game is not running at.
             ShowSpeed(MinSpeed);
