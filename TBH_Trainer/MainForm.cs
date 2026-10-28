@@ -515,8 +515,7 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(_chkBagToStash,
             "Materials go to the Material Stash tab (DLC) through the game's own move handler,"
             + "\r\nand to the ordinary stash when the tab is not owned or turns a material away."
-            + "\r\nGear is only kept at level 90+; lower gear stays in the bag."
-            + "\r\nItems with no level requirement at all - chests, artifacts - go to the stash.");
+            + "\r\nGear is only kept at level 90+ (relics always); lower gear stays in the bag.");
         _chkBagToStash.CheckedChanged += (_, _) => ApplyCombatToggle(33, _chkBagToStash.Checked);
 
         _btnBagToStashNow = MakeBtn("Empty bag now", 15, 56, 150);
@@ -1444,7 +1443,7 @@ internal sealed class MainForm : Form
         _btnBagToStashNow.Enabled = false;
         try
         {
-            Log("--- Emptying the bag into the stash (materials → Material Stash, gear 90+) ---");
+            Log("--- Emptying the bag into the stash (materials → Material Stash, gear 90+, relics) ---");
             string? result = _heroScanBridge.WriteValue(33, 0, 2f, timeoutMs: 70000);
             Log(result?.Trim() ?? "ERROR: bag to stash timed out.");
             RunInventoryScan();
@@ -1467,11 +1466,11 @@ internal sealed class MainForm : Form
             Log("ERROR: hook channel missing - restart the game with the newest TBHHook.dll.");
             return;
         }
-        // No picker any more - the button is gone and the debug channel is the only caller.
-        // +1,000% is where the account was left; raising it further measured the same.
-        const int perMille = 10_000;
-        Log($"--- Chest upgrades: writing drop chance {perMille} (= +{perMille / 10.0:N0}%) ---");
-        string? result = _heroScanBridge.WriteValue(34, perMille, 1f, timeoutMs: 15000);
+        // Read only: the hook no longer writes account values. The game reports box drop rates
+        // to its server (Box_Normal_Rate / Box_StageBoss_Rate), and raising them to +1,000,000%
+        // measured the same as leaving them alone anyway.
+        Log("--- Chest upgrades (read only) ---");
+        string? result = _heroScanBridge.WriteValue(34, 0, 0f, timeoutMs: 15000);
         Log(result?.Trim() ?? "ERROR: the hook did not answer.");
     }
 

@@ -355,8 +355,15 @@ static const ExtraStat kExtraStats[] =
     { 33,    0,     "HP Per Hit",             kStatDict,        1000000.0f, MAXED },
     { 58,    0,     "HP Per Kill",            kStatDict,        1000000.0f, MAXED },
     // Gold is a multiplier like IncreaseExpAmount (live heroes sit near 1.0), not a flat
-    // amount, so this is +100,000% rather than a number big enough to wrap the counter.
-    { 74,    0,     "Gold Amount",            kStatDict,        1000.0f,    MAXED },
+    // amount. Out of the button (and so out of Connect's auto setup): x1000 gold is the kind of
+    // jump a server-side check would notice. The Hero Stats tab can still set it by hand.
+    { 74,    0,     "Gold Amount",            kStatDict,        1000.0f,    BY_HAND },
+    // Attack Damage and Damage Addition again, this time in the stat dictionary. The Unit fields
+    // above (+0x104, +0x25C) are only Hero.hbf's mirror of it: with one-hit kill off, 1,000,000
+    // written there left Plague monsters taking many hits, so the damage roll reads the
+    // dictionary. StatType 1 = AttackDamage, 41 = DamageAddition (1.3.2 enum order).
+    { 1,     0,     "Attack Damage (stat)",   kStatDict,        1000000.0f, MAXED },
+    { 41,    0,     "Damage Addition (stat)", kStatDict,        1000000.0f, MAXED },
     // Exp is left alone on purpose - the user does not want levelling touched.
     // BaseAttackCountReduction (+0x204) is deliberately left out: it is a count the attack
     // routine counts down, not a bonus, and winding it up breaks attacks instead of helping.
@@ -2300,14 +2307,34 @@ static void* HeroStatDict(void* unit)
     return *reinterpret_cast<void**>(holder + 0x20);
 }
 
+// set_Item of the two stat dictionaries (Dictionary<StatType, float> and
+// Dictionary<EDamageAttribute, float> - two classes), looked up once each:
+// il2cpp_class_get_method_from_name walks the method list by name, and the locks write these
+// dictionaries dozens of times a second.
+static void* DictSetItem(void* dict)
+{
+    static void* s_klass[2] = {};
+    static void* s_method[2] = {};
+    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return nullptr;
+    void* klass = il2cpp_object_get_class(dict);
+    if (!klass) return nullptr;
+    for (int i = 0; i < 2; ++i)
+        if (s_klass[i] == klass) return s_method[i];
+    int slot = s_klass[0] ? 1 : 0;   // a third class would just keep replacing the second
+    s_klass[slot] = klass;
+    s_method[slot] = il2cpp_class_get_method_from_name(klass, "set_Item", 2);
+    return s_method[slot];
+}
+
+// Unity's main thread, recorded by the frame hook. The dictionary stat writes check it.
+static volatile DWORD g_mainThreadId = 0;
+
 // Same shape as the resistance write: the dictionary's own set_Item, so the game sees a normal
 // value rather than a poked field.
 static bool WriteStatDict(void* unit, int32_t statType, float value)
 {
     void* dict = HeroStatDict(unit);
-    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
-    void* klass = il2cpp_object_get_class(dict);
-    void* setItem = klass ? il2cpp_class_get_method_from_name(klass, "set_Item", 2) : nullptr;
+    void* setItem = DictSetItem(dict);
     if (!setItem) return false;
 
     int32_t key = statType;
@@ -2337,9 +2364,7 @@ static bool ReadStatDict(void* unit, int32_t statType, float* out)
 static bool WriteResist(void* unit, int32_t attribute, float value)
 {
     void* dict = ResistDict(unit);
-    if (!dict || !il2cpp_object_get_class || !il2cpp_class_get_method_from_name) return false;
-    void* klass = il2cpp_object_get_class(dict);
-    void* setItem = klass ? il2cpp_class_get_method_from_name(klass, "set_Item", 2) : nullptr;
+    void* setItem = DictSetItem(dict);
     if (!setItem) return false;
 
     int32_t key = attribute;
@@ -2441,8 +2466,27 @@ static bool ApplyHeroLocks(int32_t heroIndex)
 
     if (locks.attackDamage) WriteObscuredFloat(hero, 0x104, locks.attackDamageValue);
     if (locks.attackSpeed) WriteObscuredFloat(hero, 0x118, locks.attackSpeedValue);
+
+    // The dictionary stats (resistances and the StatType store) are written through the game's
+    // own Dictionary.set_Item - managed code that must not run on the worker thread while the
+    // main thread reads the same dictionary, and that bumps the dictionary's version on every
+    // call, which breaks any enumeration the game has open on it. So they are written from the
+    // main thread only, and at most twice a second per hero; the plain field writes above and
+    // below stay as frequent as before.
+    static ULONGLONG s_dictNext[3] = {};
+    bool dictPass = false;
+    if (g_mainThreadId && GetCurrentThreadId() == g_mainThreadId)
+    {
+        ULONGLONG now = GetTickCount64();
+        if (now >= s_dictNext[heroIndex]) { s_dictNext[heroIndex] = now + 500; dictPass = true; }
+    }
     for (int i = 0; i < kExtraStatCount; ++i)
-        if (locks.extra[i]) WriteExtraStat(hero, kExtraStats[i], locks.extraValue[i]);
+    {
+        if (!locks.extra[i]) continue;
+        bool viaDict = kExtraStats[i].kind == kStatDict || kExtraStats[i].kind == kStatResist;
+        if (viaDict && !dictPass) continue;
+        WriteExtraStat(hero, kExtraStats[i], locks.extraValue[i]);
+    }
 
     if (locks.currentHp || locks.maxHp)
     {
@@ -3115,9 +3159,11 @@ static void RunInventoryScan()
         int32_t level = *reinterpret_cast<int32_t*>(p + 0x6C);
         ++items;
         if (level >= 90) ++lv90;
+        bool relic = type == 2 && level <= 0;   // relics are gear without a level
         pos = ScanAppend(text, cap, pos, "INV slot=%3d key=%d %s grade=%d (%s) lv=%d%s\r\n",
-            i, key, type == 2 ? "GEAR" : type == 1 ? "MATERIAL" : type == 0 ? "BOX" : "?",
-            grade, GradeTypeName(grade), level, level >= 90 ? "  <- move to stash" : "");
+            i, key, relic ? "RELIC" : type == 2 ? "GEAR" : type == 1 ? "MATERIAL" : type == 0 ? "BOX" : "?",
+            grade, GradeTypeName(grade), level,
+            level >= 90 || relic ? "  <- move to stash" : "");
     }
 
     // Stash size differs per player (slots are unlocked over time): count unlocked slots only.
@@ -3263,6 +3309,8 @@ static int32_t   g_boxNoProgress = 0;
 static volatile LONG g_boxOpened = 0;
 static volatile bool g_bagBoxStuck = false;   // boxes stopped opening: the bag is probably full
 
+static void ChestLogTick(bool force = false);
+
 static void BoxJobTick()
 {
     ULONGLONG now = GetTickCount64();
@@ -3311,6 +3359,10 @@ static void BoxJobTick()
     }
     else
         g_boxNoProgress = 0;
+
+    // Take the chest sample right before opening one, so a chest that landed since the last
+    // sample is counted before the open takes the count back down and hides it.
+    ChestLogTick(true);
 
     int32_t leftButton = 0;
     void* clickArgs[1] = { &leftButton };
@@ -3519,15 +3571,11 @@ static bool BagMoveStep()
 
         // Low-level gear is not worth a stash slot and the game gives us no way to get rid of
         // it, so it stays in the bag. Counted so the trainer can say why the bag is not empty.
-        //
-        // Level 0 means the item carries no level requirement at all, which is every chest,
-        // artifact and oddment the game hands out - not weak gear. Those were being read as
-        // "below 90" and left behind, so the bag never emptied. They go to the stash.
-        if (it.itemType == kItemTypeGear && it.level > 0 && it.level < kKeepGearLevel)
-        {
-            ++gearSkipped;
-            continue;
-        }
+        // Relics are GEAR with no level at all (level 0, keys 7xxxxx: 712008, 792001, 793020...)
+        // - real gear always has one - so the level rule must not catch them: they go to the
+        // stash like anything else worth keeping.
+        bool relic = it.itemType == kItemTypeGear && it.level <= 0;
+        if (it.itemType == kItemTypeGear && !relic && it.level < kKeepGearLevel) { ++gearSkipped; continue; }
 
         // Stackable materials go to the Material Stash tab first, unless the tab has already
         // turned this kind of material away.
@@ -4441,12 +4489,269 @@ static ULONGLONG g_chestStarted = 0;
 static volatile LONG g_chestDropped[kChestKindCount];   // chests seen landing
 static volatile LONG g_chestOpened[kChestKindCount];    // chests seen leaving
 
-static void ChestLogTick()
+// ---------------------------------------------------------------------------------
+// Drops per game speed. Whether x5 pays off is a question of chests per minute of real time,
+// so the run is split by the speed it was played at (rounded to x1..x5): time in a stage,
+// monsters killed, chests landed. Chests per kill should be the same at every speed - the
+// game rolls once per kill - so a speed whose chests-per-kill drops is being held back.
+//
+// The suspect is TaskbarHero.StageBoxRequestAbuseGuard. Read from the 1.3.2 code:
+// huh() runs on every stage-box request, keeps the request times (DateTime ticks, i.e. real
+// time) in a Queue<long>, drops those older than m_detectionIntervalSeconds, and once the
+// queue holds m_requestThreshold of them sets a block-until time (now + m_blockDurationMinutes)
+// in its long field; hug(out float) answers "blocked, N seconds left" until that passes.
+// Real time means x5 fills the window five times faster. Only its fields are read here.
+// ---------------------------------------------------------------------------------
+struct SpeedBucket
+{
+    ULONGLONG activeMs;                 // time with monsters dying (menus and loads left out)
+    LONG      kills;
+    LONG      chests[kChestKindCount];
+    LONG      guardBlocks;              // times the guard started a block at this speed
+    ULONGLONG blockedMs;
+    LONG      bossRolls;                // stage bosses the game rolled a chest for (drop-roll tap)
+    LONG      mobRolls;                 // ordinary monsters the game rolled a chest for
+    int64_t   pollutionDelta;           // change in contamination while at this speed
+};
+static const int kSpeedBuckets = 6;     // 1..5 used, 0 = below 1x
+static SpeedBucket g_speedBucket[kSpeedBuckets];
+static LONG      g_bucketKillsLast = -1;
+static ULONGLONG g_bucketLastSample = 0;
+static ULONGLONG g_bucketLastKillAt = 0;
+static const ULONGLONG kBucketIdleMs = 60000;   // no kill for this long = not playing a stage
+
+static int CurrentSpeedBucket()
+{
+    float scale = (g_shared && g_shared->speedEnabled) ? g_shared->timeScale : 1.0f;
+    int b = static_cast<int>(scale + 0.5f);
+    return b < 0 ? 0 : (b >= kSpeedBuckets ? kSpeedBuckets - 1 : b);
+}
+
+static bool InstallDropRollTap();   // with the other detours further down
+static bool InstallHeroDeathTap();
+// 0 = not tried yet, 1 = installed, -1 = not a 1.3.2 game, -2 = the prologue did not match
+static int  g_dropRollTapState = 0;
+
+struct GuardApi
+{
+    void* klass = nullptr;
+    void* typeObject = nullptr;
+    void* interval = nullptr;      // float m_detectionIntervalSeconds
+    void* threshold = nullptr;     // int   m_requestThreshold
+    void* blockMinutes = nullptr;  // int   m_blockDurationMinutes
+    void* queue = nullptr;         // Queue<long> of request times (obfuscated name)
+    void* blockUntil = nullptr;    // long, 0 = not blocked (obfuscated name)
+    bool  missing = false;         // class or fields not found on this build
+};
+static GuardApi g_guard;
+
+struct GuardState
+{
+    bool    found;                 // a live instance was read
+    float   intervalSec;
+    int32_t threshold;
+    int32_t blockMinutes;
+    int32_t queued;                // requests inside the window right now
+    int64_t blockUntil;
+};
+static GuardState g_guardLast = {};
+static ULONGLONG  g_guardBlockSeenAt = 0;   // GetTickCount64 when the current block was first seen
+static LONG       g_guardBlocksTotal = 0;
+
+static bool ResolveGuardApi()
+{
+    if (g_guard.typeObject) return true;
+    if (g_guard.missing || !g_domain) return false;
+    g_guard.klass = FindClass(g_domain, "TaskbarHero", "StageBoxRequestAbuseGuard");
+    if (!g_guard.klass) { g_guard.missing = true; return false; }
+    g_guard.interval     = il2cpp_class_get_field_from_name(g_guard.klass, "m_detectionIntervalSeconds");
+    g_guard.threshold    = il2cpp_class_get_field_from_name(g_guard.klass, "m_requestThreshold");
+    g_guard.blockMinutes = il2cpp_class_get_field_from_name(g_guard.klass, "m_blockDurationMinutes");
+
+    // The two obfuscated fields are told apart by type: the only Queue, and the only long.
+    void* iter = nullptr;
+    void* field = nullptr;
+    while ((field = il2cpp_class_get_fields(g_guard.klass, &iter)) != nullptr)
+    {
+        if (il2cpp_field_get_flags(field) & 0x0010) continue;   // statics
+        char* tn = il2cpp_type_get_name(il2cpp_field_get_type(field));
+        if (!tn) continue;
+        if (StrContains(tn, "Queue"))            g_guard.queue = field;
+        else if (strcmp(tn, "System.Int64") == 0) g_guard.blockUntil = field;
+        if (il2cpp_free) il2cpp_free(tn);
+    }
+    if (!g_guard.interval || !g_guard.threshold || !g_guard.blockMinutes || !g_guard.queue || !g_guard.blockUntil)
+    {
+        g_guard.missing = true;
+        return false;
+    }
+    g_guard.typeObject = il2cpp_type_get_object(il2cpp_class_get_type(g_guard.klass));
+    return g_guard.typeObject != nullptr;
+}
+
+// Main thread only. Found again on every read rather than cached: the object belongs to a
+// scene and a stale pointer after a scene change would read freed memory.
+static bool ReadGuard(GuardState* out)
+{
+    *out = {};
+    if (!ResolveGuardApi()) return false;
+    if (!g_box.findObjects) ResolveBoxApi();
+    if (!g_box.findObjects) return false;
+
+    void* args[1] = { g_guard.typeObject };
+    void* exc = nullptr;
+    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
+    if (exc || !arr || il2cpp_array_length(arr) == 0) return false;
+    void* guard = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+    if (!guard) return false;
+
+    il2cpp_field_get_value(guard, g_guard.interval, &out->intervalSec);
+    il2cpp_field_get_value(guard, g_guard.threshold, &out->threshold);
+    il2cpp_field_get_value(guard, g_guard.blockMinutes, &out->blockMinutes);
+    il2cpp_field_get_value(guard, g_guard.blockUntil, &out->blockUntil);
+
+    void* queue = nullptr;
+    il2cpp_field_get_value(guard, g_guard.queue, &queue);
+    if (queue)
+    {
+        void* sizeField = il2cpp_class_get_field_from_name(il2cpp_object_get_class(queue), "_size");
+        if (sizeField) il2cpp_field_get_value(queue, sizeField, &out->queued);
+    }
+    out->found = true;
+    return true;
+}
+
+// The block-until field is only cleared when the game next asks, so "blocked now" is judged by
+// our own clock from the moment the block was first seen.
+static bool GuardBlockedNow(ULONGLONG now, ULONGLONG* leftMs)
+{
+    if (!g_guardLast.found || g_guardLast.blockUntil == 0 || !g_guardBlockSeenAt) return false;
+    ULONGLONG length = static_cast<ULONGLONG>(g_guardLast.blockMinutes > 0 ? g_guardLast.blockMinutes : 0) * 60000;
+    ULONGLONG gone = now - g_guardBlockSeenAt;
+    if (gone >= length) return false;
+    if (leftMs) *leftMs = length - gone;
+    return true;
+}
+
+static ULONGLONG g_guardNextRead = 0;
+
+static void GuardTick(ULONGLONG now, int bucket)
+{
+    if (now < g_guardNextRead) return;
+    g_guardNextRead = now + 1000;
+
+    GuardState s;
+    if (!ReadGuard(&s)) return;
+    if (s.blockUntil != 0 && s.blockUntil != g_guardLast.blockUntil)
+    {
+        g_guardBlockSeenAt = now;
+        ++g_guardBlocksTotal;
+        ++g_speedBucket[bucket].guardBlocks;
+    }
+    g_guardLast = s;
+}
+
+// ---------------------------------------------------------------------------------
+// Contamination (the game calls it pollution). PlaguelandsController (+0x20) holds an xo.wh,
+// which keeps the value as an ObscuredLong at +0x10 plus the time it was last brought up to
+// date. The game's own getter (kgs -> wh.khz) first runs wh.kia(now), which recomputes the value
+// for the time passed and WRITES it back - so calling it would change game state. This reads the
+// stored value instead and decodes it the way ObscuredLong's getter (0x7313D0) does:
+//   struct { int salt; long hidden; long key; long fake; }  value = (hidden - key) ^ key
+// The stored value moves whenever the game itself refreshes it (UI, stage end), which is often
+// enough for an hourly figure. The controller is the one static field of that type on
+// xo.Plaguelands. RVAs and offsets are 1.3.2's; nothing is called or written.
+// ---------------------------------------------------------------------------------
+static int     g_pollState = 0;     // 0 not tried, 1 ready, -1 not 1.3.2, -2 not found
+static void*   g_pollCtrlField = nullptr;   // static xo.Plaguelands field holding the controller
+static bool    g_pollHave = false;
+static int64_t g_pollFirst = 0, g_pollLast = 0;
+static ULONGLONG g_pollFirstAt = 0, g_pollNextRead = 0;
+
+static bool ResolvePollution()
+{
+    if (g_pollState != 0) return g_pollState == 1;
+    if (!g_shared || g_shared->buildId == 0) return false;            // build not published yet
+    if (g_shared->buildId != 10302) { g_pollState = -1; return false; }
+    // The two classes are found through methods of theirs; the methods are never called.
+    void* ctrlClass = nullptr;
+    void* plClass = nullptr;
+    FindMethodByRva(0xA01990, 1, &ctrlClass);                         // PlaguelandsController.kgs
+    FindMethodByRva(0xA02D30, 1, &plClass);                           // Plaguelands.kfk
+    if (plClass && ctrlClass && il2cpp_class_get_name)
+    {
+        const char* ctrlName = il2cpp_class_get_name(ctrlClass);
+        void* iter = nullptr;
+        void* field = nullptr;
+        while ((field = il2cpp_class_get_fields(plClass, &iter)) != nullptr)
+        {
+            if (!(il2cpp_field_get_flags(field) & 0x0010)) continue;   // statics only
+            // Nested type, so the full name is "xo/PlaguelandsController": match the tail.
+            char* tn = il2cpp_type_get_name(il2cpp_field_get_type(field));
+            bool match = tn && ctrlName && StrContains(tn, ctrlName);
+            if (tn && il2cpp_free) il2cpp_free(tn);
+            if (match) { g_pollCtrlField = field; break; }
+        }
+    }
+    g_pollState = g_pollCtrlField ? 1 : -2;
+    return g_pollState == 1;
+}
+
+static bool ReadPollution(int64_t* out)
+{
+    if (!ResolvePollution() || !il2cpp_field_static_get_value) return false;
+    void* ctrl = nullptr;
+    il2cpp_field_static_get_value(g_pollCtrlField, &ctrl);
+    if (!ctrl) return false;                                           // not loaded yet
+    uint8_t* wh = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(ctrl) + 0x20);
+    if (!wh) return false;
+    int64_t hidden = *reinterpret_cast<int64_t*>(wh + 0x10 + 0x08);
+    int64_t key    = *reinterpret_cast<int64_t*>(wh + 0x10 + 0x10);
+    if (hidden == 0 && key == 0) return false;                         // never initialised
+    *out = (hidden - key) ^ key;
+    return true;
+}
+
+static void PollutionTick(ULONGLONG now, int bucket)
+{
+    if (now < g_pollNextRead) return;
+    g_pollNextRead = now + 5000;
+    int64_t v = 0;
+    if (!ReadPollution(&v)) return;
+    if (!g_pollHave) { g_pollFirst = g_pollLast = v; g_pollFirstAt = now; g_pollHave = true; return; }
+    g_speedBucket[bucket].pollutionDelta += v - g_pollLast;
+    g_pollLast = v;
+}
+
+static void ChestLogTick(bool force)
 {
     ULONGLONG now = GetTickCount64();
-    if (now < g_chestNextSample) return;
-    g_chestNextSample = now + 1000;
+    if (!force && now < g_chestNextSample) return;
+    g_chestNextSample = now + 250;
     if (!g_chestStarted) g_chestStarted = now;
+    InstallDropRollTap();   // tries once; main thread, where the game also runs the roll
+    InstallHeroDeathTap();
+
+    // Time and kills go to the speed the game is running at now.
+    int bucket = CurrentSpeedBucket();
+    LONG kills = g_killedByHero + g_killedByDamage + g_killedByDie;
+    if (g_bucketKillsLast >= 0 && kills > g_bucketKillsLast)
+    {
+        g_speedBucket[bucket].kills += kills - g_bucketKillsLast;
+        g_bucketLastKillAt = now;
+    }
+    g_bucketKillsLast = kills;
+    if (g_bucketLastSample)
+    {
+        ULONGLONG step = now - g_bucketLastSample;
+        // Kills are only counted while one-hit kill runs; without it all time counts.
+        bool playing = !g_oneHitKill || (g_bucketLastKillAt && now - g_bucketLastKillAt < kBucketIdleMs);
+        if (playing && step < 10000) g_speedBucket[bucket].activeMs += step;
+        if (step < 10000 && GuardBlockedNow(now, nullptr)) g_speedBucket[bucket].blockedMs += step;
+    }
+    g_bucketLastSample = now;
+    if (!force) GuardTick(now, bucket);
+    if (!force) PollutionTick(now, bucket);
 
     int32_t cur[kChestKindCount];
     for (int i = 0; i < kChestKindCount; ++i)
@@ -4465,8 +4770,13 @@ static void ChestLogTick()
     for (int i = 0; i < kChestKindCount; ++i)
     {
         if (cur[i] == g_chestLast[i]) continue;
-        if (cur[i] > g_chestLast[i]) InterlockedExchangeAdd(&g_chestDropped[i], cur[i] - g_chestLast[i]);
-        else                          InterlockedExchangeAdd(&g_chestOpened[i], g_chestLast[i] - cur[i]);
+        if (cur[i] > g_chestLast[i])
+        {
+            InterlockedExchangeAdd(&g_chestDropped[i], cur[i] - g_chestLast[i]);
+            g_speedBucket[bucket].chests[i] += cur[i] - g_chestLast[i];
+        }
+        else
+            InterlockedExchangeAdd(&g_chestOpened[i], g_chestLast[i] - cur[i]);
 
         LONG slot = InterlockedIncrement(&g_chestLogCount) - 1;
         ChestLogEntry& e = g_chestLog[slot % kChestLogMax];
@@ -4476,6 +4786,103 @@ static void ChestLogTick()
         e.to = cur[i];
         g_chestLast[i] = cur[i];
     }
+}
+
+static void FormatMinSec(char* out, size_t cap, ULONGLONG ms)
+{
+    ULONGLONG s = ms / 1000;
+    if (s >= 3600) sprintf_s(out, cap, "%llu:%02llu:%02llu", s / 3600, (s / 60) % 60, s % 60);
+    else           sprintf_s(out, cap, "%llu:%02llu", s / 60, s % 60);
+}
+
+// Chests per speed, and what the box-request guard is doing. Shared by the chest log and the
+// self-check.
+static size_t AppendDropStats(char* text, size_t cap, size_t pos)
+{
+    pos = ScanAppend(text, cap, pos, "chest drops by game speed (time = in a stage, kills going on):\r\n");
+    bool any = false;
+    for (int b = 0; b < kSpeedBuckets; ++b)
+    {
+        const SpeedBucket& s = g_speedBucket[b];
+        LONG normal = s.chests[0] + s.chests[3], boss = s.chests[1] + s.chests[4], act = s.chests[2] + s.chests[5];
+        LONG all = normal + boss + act;
+        if (s.activeMs < 1000 && !all && !s.kills) continue;
+        any = true;
+        char t[32];
+        FormatMinSec(t, sizeof(t), s.activeMs);
+        double minutes = s.activeMs / 60000.0;
+        pos = ScanAppend(text, cap, pos,
+            "  x%d: %s | kills %ld (%.0f/min) | chests %ld = %ld normal, %ld stage boss, %ld act boss (%.2f/min",
+            b, t, s.kills, minutes > 0 ? s.kills / minutes : 0.0, all, normal, boss, act,
+            minutes > 0 ? all / minutes : 0.0);
+        if (normal > 0 && s.kills > 0)
+            pos = ScanAppend(text, cap, pos, ", 1 normal per %ld kills", s.kills / normal);
+        pos = ScanAppend(text, cap, pos, ")");
+        if (s.pollutionDelta != 0)
+            pos = ScanAppend(text, cap, pos, " | contamination %+lld (%+.0f/hour)",
+                static_cast<long long>(s.pollutionDelta),
+                minutes > 0 ? s.pollutionDelta * 60.0 / minutes : 0.0);
+        if (s.bossRolls || s.mobRolls)
+        {
+            pos = ScanAppend(text, cap, pos, " | stage bosses killed %ld (%.2f/min)",
+                s.bossRolls, minutes > 0 ? s.bossRolls / minutes : 0.0);
+            if (boss > 0)
+                pos = ScanAppend(text, cap, pos, ", 1 stage boss chest per %.1f bosses",
+                    static_cast<double>(s.bossRolls) / boss);
+        }
+        if (s.guardBlocks || s.blockedMs)
+        {
+            FormatMinSec(t, sizeof(t), s.blockedMs);
+            pos = ScanAppend(text, cap, pos, " | guard blocked %ld time(s), %s", s.guardBlocks, t);
+        }
+        pos = ScanAppend(text, cap, pos, "\r\n");
+    }
+    if (!any) pos = ScanAppend(text, cap, pos, "  nothing yet - play a stage and check again.\r\n");
+    if (g_pollHave)
+    {
+        double hours = (GetTickCount64() - g_pollFirstAt) / 3600000.0;
+        pos = ScanAppend(text, cap, pos,
+            "  contamination now %lld | first read %lld, %.1f h ago: %+lld (%+.0f/hour)\r\n",
+            static_cast<long long>(g_pollLast), static_cast<long long>(g_pollFirst), hours,
+            static_cast<long long>(g_pollLast - g_pollFirst),
+            hours > 0.01 ? (g_pollLast - g_pollFirst) / hours : 0.0);
+    }
+    else
+        pos = ScanAppend(text, cap, pos, "  contamination: %s\r\n",
+            g_pollState == -1 ? "reader needs game build 1.3.2"
+          : g_pollState == -2 ? "Plaguelands controller not found"
+          :                     "not read yet");
+    if (g_dropRollTapState != 1)
+        pos = ScanAppend(text, cap, pos, "  (stage-boss counter not installed: %s)\r\n",
+            g_dropRollTapState == -1 ? "it needs game build 1.3.2"
+          : g_dropRollTapState == -2 ? "the roll function's prologue did not match"
+          :                            "waiting for the trainer to publish the game build");
+    if (!g_oneHitKill)
+        pos = ScanAppend(text, cap, pos, "  (kills are only counted with one-hit kill ON)\r\n");
+
+    if (g_guard.missing)
+        pos = ScanAppend(text, cap, pos, "box request guard: not found on this build\r\n");
+    else if (!g_guardLast.found)
+        pos = ScanAppend(text, cap, pos, "box request guard: not read yet (no stage loaded?)\r\n");
+    else
+    {
+        ULONGLONG left = 0;
+        bool blocked = GuardBlockedNow(GetTickCount64(), &left);
+        pos = ScanAppend(text, cap, pos,
+            "box request guard: %d requests within %.0f s blocks box requests for %d min | "
+            "in the window now: %d | blocks seen: %ld | ",
+            g_guardLast.threshold, g_guardLast.intervalSec, g_guardLast.blockMinutes,
+            g_guardLast.queued, g_guardBlocksTotal);
+        if (blocked)
+        {
+            char t[32];
+            FormatMinSec(t, sizeof(t), left);
+            pos = ScanAppend(text, cap, pos, "BLOCKED now, about %s left\r\n", t);
+        }
+        else
+            pos = ScanAppend(text, cap, pos, "not blocked\r\n");
+    }
+    return pos;
 }
 
 // Command 37: print the log. value != 0 clears it afterwards.
@@ -4508,6 +4915,8 @@ static void RunChestLog(bool clear)
                 "  plague chests: %ld in %llu:%02llu = one every %llu s\r\n",
                 plague, ran / 60, ran % 60, ran / (ULONGLONG)plague);
     }
+    pos = ScanAppend(text, cap, pos, "\r\n");
+    pos = AppendDropStats(text, cap, pos);
 
     LONG shown = total < kChestLogMax ? total : kChestLogMax;
     LONG first = total - shown;
@@ -4532,6 +4941,9 @@ static void RunChestLog(bool clear)
             InterlockedExchange(&g_chestDropped[i], 0);
             InterlockedExchange(&g_chestOpened[i], 0);
         }
+        memset(g_speedBucket, 0, sizeof(g_speedBucket));
+        g_guardBlocksTotal = 0;
+        g_pollHave = false;   // contamination baseline restarts with the counters
         g_chestStarted = now;
         pos = ScanAppend(text, cap, pos, "\r\nLog cleared.\r\n");
     }
@@ -4546,6 +4958,7 @@ static void HookedSimUpdate(void* self, const void* method)
 {
     InterlockedIncrement(&g_frameCount);
     bool paused = g_shared && g_shared->trainerPaused;
+    g_mainThreadId = GetCurrentThreadId();
     if (g_godMode && !g_shuttingDown && !paused)
     {
         ApplyGodModeAllHeroes();
@@ -4554,6 +4967,12 @@ static void HookedSimUpdate(void* self, const void* method)
         // keeps the per-frame cost down at high speed, where frames are already heavy.
         if (!g_origHeroDamage || (g_frameCount % 10) == 0)
             for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
+    }
+    else if (!g_shuttingDown && !paused && (g_frameCount % 10) == 0)
+    {
+        // Without god mode this is still the only place the dictionary stats get written
+        // (the worker thread skips them), so the locks keep a main-thread pass of their own.
+        for (int32_t heroIndex = 0; heroIndex < 3; ++heroIndex) ApplyHeroLocks(heroIndex);
     }
     if (g_oneHitKill && !g_shuttingDown && !paused) StuckMonsterTick();
     if (!g_shuttingDown && !paused) ChestLogTick();
@@ -4701,6 +5120,138 @@ static bool InstallDropRateTap()
                            reinterpret_cast<void**>(&g_origDropRate));
 }
 
+// --- counting the chest rolls (1.3.2) -------------------------------------------------------
+// StageManager.jek(int, EStageType, int dropKey, float rate, EMonsterType) at 0x932FF0 is where
+// a dead monster's chest roll happens: it returns early for EStageType 1 and 3 (the act-boss
+// stages, hbn/kwj) and for dropKey 0, then picks the stage-boss chest helper when the monster
+// type is BOSS (1) and the normal one otherwise. Counting the calls that get that far says how
+// many bosses were actually killed at each speed, which is what the boss-chest count is
+// compared against. The tap only counts; the original always runs with the same arguments.
+typedef void (*DropRollFn)(void* self, int32_t a, int32_t stageType, int32_t dropKey,
+                           float rate, int32_t monsterType, const void* method);
+static DropRollFn g_origDropRoll = nullptr;
+
+static void HookedDropRoll(void* self, int32_t a, int32_t stageType, int32_t dropKey,
+                           float rate, int32_t monsterType, const void* method)
+{
+    if (dropKey != 0 && stageType != 1 && stageType != 3)
+    {
+        SpeedBucket& s = g_speedBucket[CurrentSpeedBucket()];
+        if (monsterType == 1) ++s.bossRolls;
+        else                  ++s.mobRolls;
+    }
+    g_origDropRoll(self, a, stageType, dropKey, rate, monsterType, method);
+}
+
+static bool InstallDropRollTap()
+{
+    if (g_dropRollTapState != 0) return g_dropRollTapState == 1;
+    // The frame hook runs before the trainer has published the build, so wait for it rather
+    // than give up on the first frame - that is exactly how the first version never installed.
+    if (!g_shared || g_shared->buildId == 0) return false;
+    if (g_shared->buildId != 10302) { g_dropRollTapState = -1; return false; }   // RVA measured on 1.3.2 only
+    // mov [rsp+8],rbx; mov [rsp+10h],rbp - two whole instructions, nothing RIP-relative
+    static const uint8_t kProl[10] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10 };
+    uint8_t* target = reinterpret_cast<uint8_t*>(g_gameAssembly) + 0x932FF0;
+    bool on = InstallDetourAt(target, kProl, sizeof(kProl),
+                              reinterpret_cast<void*>(&HookedDropRoll),
+                              reinterpret_cast<void**>(&g_origDropRoll));
+    g_dropRollTapState = on ? 1 : -2;
+    return on;
+}
+
+// --- watching hero deaths (1.3.2) -----------------------------------------------------------
+// Heroes leave the field with god mode on, full HP (2e9) and zero hits reaching pp.hby - the
+// speed watch never saw their HP move. So the death does not come through the HP field.
+// Hero.hbd(Unit killer) at 0xE19EF0 is the hero's override of the death call (Monster.hbd is
+// the monster one the stuck handler uses). This tap records who called it, with what HP, and
+// from where in the game's code, then lets the original run unchanged.
+typedef bool (*HeroDieFn)(void* self, void* killer, const void* method);
+static HeroDieFn g_origHeroDie = nullptr;
+static int  g_heroDeathTapState = 0;    // 0 not tried, 1 installed, -1 not 1.3.2, -2 prologue mismatch
+static volatile LONG g_heroDeaths = 0;
+
+struct HeroDeathEvent
+{
+    ULONGLONG when;
+    void*     hero;
+    float     hp, maxHp;
+    char      killer[48];               // class of the killer unit, or "(none)"
+    uint32_t  callers[6];               // RVAs of the return addresses, innermost first
+    int       callerCount;
+};
+static HeroDeathEvent g_heroDeathLog[8];
+
+static bool HookedHeroDie(void* self, void* killer, const void* method)
+{
+    LONG n = InterlockedIncrement(&g_heroDeaths) - 1;
+    HeroDeathEvent& e = g_heroDeathLog[n % 8];
+    e = {};
+    e.when = GetTickCount64();
+    e.hero = self;
+    e.hp = e.maxHp = -1.0f;
+    void* heroClass = (self && il2cpp_object_get_class) ? il2cpp_object_get_class(self) : nullptr;
+    void* healthField = heroClass ? FindFieldOnClassOrParents(heroClass, "UnitHealthController") : nullptr;
+    void* health = nullptr;
+    if (healthField) il2cpp_field_get_value(self, healthField, &health);
+    if (health)
+    {
+        e.hp = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + 0x40);
+        e.maxHp = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(health) + MaxHpOffset());
+    }
+    const char* kname = (killer && il2cpp_object_get_class && il2cpp_class_get_name)
+                      ? il2cpp_class_get_name(il2cpp_object_get_class(killer)) : nullptr;
+    strncpy_s(e.killer, kname ? kname : "(none)", _TRUNCATE);
+
+    void* frames[8] = {};
+    USHORT got = RtlCaptureStackBackTrace(1, 8, frames, nullptr);   // skip this function
+    uintptr_t base = reinterpret_cast<uintptr_t>(g_gameAssembly);
+    for (USHORT i = 0; i < got && e.callerCount < 6; ++i)
+    {
+        uintptr_t a = reinterpret_cast<uintptr_t>(frames[i]);
+        if (a > base && a - base < 0x10000000)                         // game code only
+            e.callers[e.callerCount++] = static_cast<uint32_t>(a - base);
+    }
+    return g_origHeroDie(self, killer, method);
+}
+
+static bool InstallHeroDeathTap()
+{
+    if (g_heroDeathTapState != 0) return g_heroDeathTapState == 1;
+    if (!g_shared || g_shared->buildId == 0) return false;
+    if (g_shared->buildId != 10302) { g_heroDeathTapState = -1; return false; }
+    // mov [rsp+20h],rbx; push rsi; sub rsp,30h - whole instructions, nothing RIP-relative
+    static const uint8_t kProl[10] = { 0x48, 0x89, 0x5C, 0x24, 0x20, 0x56, 0x48, 0x83, 0xEC, 0x30 };
+    uint8_t* target = reinterpret_cast<uint8_t*>(g_gameAssembly) + 0xE19EF0;
+    bool on = InstallDetourAt(target, kProl, sizeof(kProl),
+                              reinterpret_cast<void*>(&HookedHeroDie),
+                              reinterpret_cast<void**>(&g_origHeroDie));
+    g_heroDeathTapState = on ? 1 : -2;
+    return on;
+}
+
+static size_t AppendHeroDeaths(char* text, size_t cap, size_t pos)
+{
+    if (g_heroDeathTapState != 1)
+        return ScanAppend(text, cap, pos, "hero deaths: watcher not installed (%s)\r\n",
+            g_heroDeathTapState == -1 ? "needs game build 1.3.2"
+          : g_heroDeathTapState == -2 ? "prologue did not match" : "waiting for the build");
+    LONG total = g_heroDeaths;
+    pos = ScanAppend(text, cap, pos, "hero deaths: %ld (Hero.hbd calls since the hook started)\r\n", total);
+    LONG shown = total < 8 ? total : 8;
+    ULONGLONG now = GetTickCount64();
+    for (LONG k = total - shown; k < total; ++k)
+    {
+        const HeroDeathEvent& e = g_heroDeathLog[k % 8];
+        pos = ScanAppend(text, cap, pos, "  %llus ago: hero %p hp=%.0f/%.0f killer=%s from",
+            (now - e.when) / 1000, e.hero, e.hp, e.maxHp, e.killer);
+        for (int i = 0; i < e.callerCount; ++i)
+            pos = ScanAppend(text, cap, pos, " 0x%X", e.callers[i]);
+        pos = ScanAppend(text, cap, pos, "\r\n");
+    }
+    return pos;
+}
+
 static bool InstallDamageDetour(int32_t rva, void* replacement, HeroDamageFn* original)
 {
     if (*original) return true;
@@ -4760,6 +5311,37 @@ static bool InstallHeroDamageHook()
     return InstallDamageDetour(g_shared ? g_shared->rvaHeroDamage : 0,
                                reinterpret_cast<void*>(&HookedHeroDamage),
                                &g_origHeroDamage);
+}
+
+// pl.hby (the profile's MonsterDamageRva, 0xE41730 on 1.3.2) is the second door. The hero
+// death watcher caught a hero dying at hp=0/2e9 with killer=Monster through
+//   Hero.ele -> Hero.hal -> Unit.hal -> pl.hby (+0xF5) -> Hero.hbd
+// while the speed watch counted 0 hits reaching pp.hby: some heroes' health controllers are
+// pl, and pl.hby applies the damage and calls the death itself instead of going through the
+// base pp.hby that god mode guarded. Same rule as there - only a hero's hit is swallowed, so
+// monsters (and the stuck handler, which calls pl.hby on them) are untouched.
+static HeroDamageFn g_origPlDamage = nullptr;
+
+static void HookedPlDamage(void* self, float damage, void* attacker, const void* method)
+{
+    if (g_godMode && !g_shuttingDown && !(g_shared && g_shared->trainerPaused) &&
+        (HealthBelongsToHero(self) || IsHeroHealth(self)))
+    {
+        InterlockedIncrement(&g_heroHitsBlocked);
+        return;
+    }
+    if (g_origPlDamage) g_origPlDamage(self, damage, attacker, method);
+}
+
+static bool InstallPlDamageHook()
+{
+    static bool tried = false;
+    if (g_origPlDamage) return true;
+    if (tried) return false;
+    tried = true;
+    return InstallDamageDetour(g_shared ? g_shared->rvaMonsterDamage : 0,
+                               reinterpret_cast<void*>(&HookedPlDamage),
+                               &g_origPlDamage);
 }
 
 static bool InstallSimUpdateHook()
@@ -5335,6 +5917,7 @@ static void RunSelfCheck()
     pos = ScanAppend(text, cap, pos, "monsters killed: %ld by a hero, %ld by our damage, %ld by the death call\r\n",
         g_killedByHero, g_killedByDamage, g_killedByDie);
     pos = ScanAppend(text, cap, pos, "stranded monsters carried to a hero: %ld\r\n", g_monstersMoved);
+    pos = AppendHeroDeaths(text, cap, pos);
 
     bool boxApi = ResolveBoxApi();
     pos = ScanAppend(text, cap, pos, "auto open boxes: %s | box API: %s%s%s | opened so far: %ld\r\n",
@@ -5351,6 +5934,7 @@ static void RunSelfCheck()
         pos = ScanAppend(text, cap, pos,
             "plague chests held: %d normal, %d stage boss, %d act boss (they stop dropping when full)\r\n",
             heldNormal, heldBoss, heldAct);
+    pos = AppendDropStats(text, cap, pos);
 
     int32_t used = 0, unlocked = 0, total = 0;
     if (StashSlotStats(&used, &unlocked, &total))
@@ -5411,8 +5995,8 @@ static void RunHeroCommand()
                 // Materials go to the Material Stash when the DLC is owned (game's own move
                 // handler); otherwise they land in the ordinary stash.
                 !on ? "" : HasMaterialStashDlc()
-                    ? " - when the bag fills up; materials to Material Stash, gear 90+ only"
-                    : " - when the bag fills up; materials to stash, gear 90+ only",
+                    ? " - when the bag fills up; materials to Material Stash, gear 90+ and relics"
+                    : " - when the bag fills up; materials to stash, gear 90+ and relics",
                 g_bagMoved, g_bagError[0] ? " last note: " : "", g_bagError);
         }
         g_heroScan->length = static_cast<int32_t>(n);
@@ -5452,8 +6036,10 @@ static void RunHeroCommand()
         // frame boundary, which at 20x can be ten seconds of game time away.
         bool godOn = g_heroScan->command == 13 && on;
         bool hooked = godOn ? InstallHeroDamageHook() : false;
+        bool plHooked = godOn ? InstallPlDamageHook() : false;
         const char* note =
-            godOn ? (hooked ? " - damage blocked at the source"
+            godOn ? (hooked ? (plHooked ? " - damage blocked at the source (pp.hby + pl.hby)"
+                                        : " - damage blocked at pp.hby only (pl.hby hook did not install)")
                             : " - WARNING: damage hook did not install, HP writes only") : "";
         size_t n = ScanAppend(g_heroScan->text, sizeof(g_heroScan->text), 0, "OK: %s %s%s\r\n",
             g_heroScan->command == 12 ? "One-hit kill" : "God mode", on ? "ON" : "OFF", note);
@@ -6144,8 +6730,10 @@ static DWORD WINAPI WorkerThread(LPVOID)
                 g_heroScan->done = 0;
                 g_heroScan->length = 0;
                 memset(g_heroScan->text, 0, sizeof(g_heroScan->text));
-                if (g_heroScan->value == 2.0f) RunCeilingProbe();
-                else RunAccountUpgrades(g_heroScan->value != 0.0f, g_heroScan->heroIndex);
+                // Report only. The drop-chance values are what the game's Box_Normal_Rate /
+                // Box_StageBoss_Rate reports to the server are about, so this build never writes
+                // account values - not the upgrade itself, not the ceiling probe's test write.
+                RunAccountUpgrades(false, 0);
             }
             else if (g_heroScan->command == 31)
             {

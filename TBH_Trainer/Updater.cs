@@ -9,7 +9,7 @@ namespace TBH_Trainer;
 internal static class AppInfo
 {
     /// <summary>Bump together with the GitHub release tag (v&lt;Version&gt;).</summary>
-    public const string Version = "3.0.1";
+    public const string Version = "3.1.0";
 }
 
 /// <summary>
