@@ -3229,6 +3229,7 @@ struct BoxApi
 {
     void* stageBoxClass = nullptr;
     void* findObjects = nullptr;   // UnityEngine.Object.FindObjectsOfType(Type)
+    void* findByType = nullptr;    // UnityEngine.Object.FindObjectsByType(Type, FindObjectsSortMode)
     void* typeObject = nullptr;    // typeof(StageBox)
     void* click = nullptr;         // StageBox.(PointerEventData.InputButton) click handler
     void* count = nullptr;         // static int (EBoxType, EContentType)
@@ -3253,6 +3254,26 @@ static bool ResolveBoxApi()
     {
         void* objClass = FindClass(g_domain, "UnityEngine", "Object");
         g_box.findObjects = objClass ? il2cpp_class_get_method_from_name(objClass, "FindObjectsOfType", 1) : nullptr;
+    }
+    if (!g_box.findByType)
+    {
+        // Picked by parameter types: the generic FindObjectsByType<T>(FindObjectsInactive,
+        // FindObjectsSortMode) has two parameters too, and a by-name lookup can return it.
+        void* objClass = FindClass(g_domain, "UnityEngine", "Object");
+        void* iter = nullptr;
+        void* m = nullptr;
+        while (objClass && (m = il2cpp_class_get_methods(objClass, &iter)) != nullptr)
+        {
+            if (strcmp(il2cpp_method_get_name(m), "FindObjectsByType") != 0) continue;
+            if (il2cpp_method_get_param_count(m) != 2) continue;
+            char* t0 = il2cpp_type_get_name(il2cpp_method_get_param(m, 0));
+            char* t1 = il2cpp_type_get_name(il2cpp_method_get_param(m, 1));
+            bool match = t0 && t1 && strcmp(t0, "System.Type") == 0 &&
+                         strcmp(t1, "UnityEngine.FindObjectsSortMode") == 0;
+            if (t0 && il2cpp_free) il2cpp_free(t0);
+            if (t1 && il2cpp_free) il2cpp_free(t1);
+            if (match) { g_box.findByType = m; break; }
+        }
     }
     if (!g_box.typeObject)
         g_box.typeObject = il2cpp_type_get_object(il2cpp_class_get_type(g_box.stageBoxClass));
@@ -3296,6 +3317,23 @@ struct SceneQuery
     ULONGLONG nextRefresh = 0;
 };
 
+// FindObjectsOfType sorts what it finds by instance ID; FindObjectsByType with
+// FindObjectsSortMode.None (0) skips that sort. Used when the method resolves; the flag is
+// a plain global so the two can be compared on a live game. Per-method timings are kept
+// for the self-check.
+static volatile bool g_findUnsorted = true;
+struct FindTiming { LONG calls; double totalMs, maxMs; };
+static FindTiming g_findTiming[2];   // [0] FindObjectsOfType, [1] FindObjectsByType(None)
+
+static double QpcMs()
+{
+    static LARGE_INTEGER freq = {};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
 static void* FindObjectsCached(SceneQuery& q, void* typeObject, ULONGLONG refreshMs)
 {
     ULONGLONG now = GetTickCount64();
@@ -3306,9 +3344,17 @@ static void* FindObjectsCached(SceneQuery& q, void* typeObject, ULONGLONG refres
         if (held) return held;
     }
     if (!g_box.findObjects || !typeObject) return nullptr;
-    void* args[1] = { typeObject };
+    bool unsorted = g_findUnsorted && g_box.findByType;
+    int32_t sortNone = 0;
+    void* args[2] = { typeObject, &sortNone };
     void* exc = nullptr;
-    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
+    double t0 = QpcMs();
+    void* arr = il2cpp_runtime_invoke(unsorted ? g_box.findByType : g_box.findObjects, nullptr, args, &exc);
+    double ms = QpcMs() - t0;
+    FindTiming& ft = g_findTiming[unsorted ? 1 : 0];
+    ++ft.calls;
+    ft.totalMs += ms;
+    if (ms > ft.maxMs) ft.maxMs = ms;
     if (exc) arr = nullptr;
     q.nextRefresh = now + refreshMs;
     if (canHold)
@@ -5998,6 +6044,14 @@ static void RunSelfCheck()
     pos = ScanAppend(text, cap, pos, "auto open boxes: %s | box API: %s%s%s | opened so far: %ld\r\n",
         g_autoOpenBoxes ? "ON" : "off", boxApi ? "ok" : "NOT resolved",
         boxApi ? "" : " - ", boxApi ? "" : g_boxError, g_boxOpened);
+    for (int i = 0; i < 2; ++i)
+    {
+        const FindTiming& ft = g_findTiming[i];
+        pos = ScanAppend(text, cap, pos, "  scene search %-28s %ld call(s), avg %.1f ms, max %.1f ms%s\r\n",
+            i ? "FindObjectsByType(None):" : "FindObjectsOfType:", ft.calls,
+            ft.calls ? ft.totalMs / ft.calls : 0.0, ft.maxMs,
+            (i == 1) == (g_findUnsorted && g_box.findByType) ? "  <- in use" : "");
+    }
 
     pos = ScanAppend(text, cap, pos,
         "bag to stash: %s | bag free slots: %d | moved so far: %ld (%ld to Material Stash, %ld not in the aimed slot)%s%s\r\n",
