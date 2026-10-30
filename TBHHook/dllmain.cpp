@@ -150,6 +150,10 @@ typedef size_t (*il2cpp_field_get_offset_t)(void* field);
 typedef const void* (*il2cpp_field_get_type_t)(void* field);
 typedef char* (*il2cpp_type_get_name_t)(const void* type);
 typedef void (*il2cpp_free_t)(void* ptr);
+// Unity 6 made Il2CppGCHandle pointer-sized; a uint32_t handle is truncated and crashes.
+typedef void* (*il2cpp_gchandle_new_t)(void* obj, bool pinned);
+typedef void* (*il2cpp_gchandle_get_target_t)(void* handle);
+typedef void (*il2cpp_gchandle_free_t)(void* handle);
 typedef const void* (*il2cpp_class_get_type_t)(void* klass);
 typedef void* (*il2cpp_type_get_object_t)(const void* type);
 typedef uint32_t (*il2cpp_method_get_flags_t)(void* method, uint32_t* iflags);
@@ -161,6 +165,9 @@ static il2cpp_field_get_offset_t il2cpp_field_get_offset;
 static il2cpp_field_get_type_t   il2cpp_field_get_type;
 static il2cpp_type_get_name_t    il2cpp_type_get_name;
 static il2cpp_free_t             il2cpp_free;
+static il2cpp_gchandle_new_t        il2cpp_gchandle_new;
+static il2cpp_gchandle_get_target_t il2cpp_gchandle_get_target;
+static il2cpp_gchandle_free_t       il2cpp_gchandle_free;
 static il2cpp_class_get_type_t   il2cpp_class_get_type;
 static il2cpp_type_get_object_t  il2cpp_type_get_object;
 static il2cpp_method_get_flags_t       il2cpp_method_get_flags;
@@ -468,6 +475,9 @@ static bool LoadIl2Cpp()
     il2cpp_field_get_type             = Resolve<il2cpp_field_get_type_t>(g_gameAssembly,              "il2cpp_field_get_type");
     il2cpp_type_get_name              = Resolve<il2cpp_type_get_name_t>(g_gameAssembly,               "il2cpp_type_get_name");
     il2cpp_free                       = Resolve<il2cpp_free_t>(g_gameAssembly,                        "il2cpp_free");
+    il2cpp_gchandle_new               = Resolve<il2cpp_gchandle_new_t>(g_gameAssembly,                "il2cpp_gchandle_new");
+    il2cpp_gchandle_get_target        = Resolve<il2cpp_gchandle_get_target_t>(g_gameAssembly,         "il2cpp_gchandle_get_target");
+    il2cpp_gchandle_free              = Resolve<il2cpp_gchandle_free_t>(g_gameAssembly,               "il2cpp_gchandle_free");
     il2cpp_class_get_type             = Resolve<il2cpp_class_get_type_t>(g_gameAssembly,              "il2cpp_class_get_type");
     il2cpp_type_get_object            = Resolve<il2cpp_type_get_object_t>(g_gameAssembly,             "il2cpp_type_get_object");
     il2cpp_method_get_flags           = Resolve<il2cpp_method_get_flags_t>(g_gameAssembly,            "il2cpp_method_get_flags");
@@ -3275,6 +3285,42 @@ static bool ResolveBoxApi()
     return false;
 }
 
+// FindObjectsOfType walks every object in the scene, and on a long session that measured
+// several hundred ms per call: run every 250 ms it held the game at 2-3 fps. So the result is
+// kept (behind a GC handle, so the array is not collected under us) and searched for again
+// only every refreshMs. An element can be a destroyed Unity object by then; a call on one
+// comes back as an exception, which every caller already treats as "skip".
+struct SceneQuery
+{
+    void*     handle = nullptr;
+    ULONGLONG nextRefresh = 0;
+};
+
+static void* FindObjectsCached(SceneQuery& q, void* typeObject, ULONGLONG refreshMs)
+{
+    ULONGLONG now = GetTickCount64();
+    bool canHold = il2cpp_gchandle_new && il2cpp_gchandle_get_target && il2cpp_gchandle_free;
+    if (canHold && q.handle && now < q.nextRefresh)
+    {
+        void* held = il2cpp_gchandle_get_target(q.handle);
+        if (held) return held;
+    }
+    if (!g_box.findObjects || !typeObject) return nullptr;
+    void* args[1] = { typeObject };
+    void* exc = nullptr;
+    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
+    if (exc) arr = nullptr;
+    q.nextRefresh = now + refreshMs;
+    if (canHold)
+    {
+        if (q.handle) il2cpp_gchandle_free(q.handle);
+        q.handle = arr ? il2cpp_gchandle_new(arr, false) : nullptr;
+    }
+    return arr;
+}
+
+static SceneQuery g_boxQuery;
+
 static int32_t BoxCount(void* stageBox)
 {
     int32_t boxType = 0, contentType = 0;
@@ -3318,21 +3364,26 @@ static void BoxJobTick()
     g_boxNextCheck = now + 250;
     if (!ResolveBoxApi()) return;
 
-    void* args[1] = { g_box.typeObject };
+    void* arr = FindObjectsCached(g_boxQuery, g_box.typeObject, 10000);
+    if (!arr) return;
     void* exc = nullptr;
-    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
-    if (exc || !arr) return;
 
     void* target = nullptr;
     int32_t count = 0;
     uint32_t n = il2cpp_array_length(arr);
     void** elems = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+    bool sawDead = false;
     for (uint32_t i = 0; i < n && !target; ++i)
     {
         if (!elems[i]) continue;
+        // UnityEngine.Object.m_CachedPtr (+0x10) is cleared when the object is destroyed. A box
+        // from the cached search can be one of those after a stage change; its count still reads
+        // (it is per box type), but a click on it opens nothing and would look like a full bag.
+        if (!*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(elems[i]) + 0x10)) { sawDead = true; continue; }
         int32_t c = BoxCount(elems[i]);
         if (c > 0) { target = elems[i]; count = c; }
     }
+    if (sawDead) g_boxQuery.nextRefresh = 0;   // search again next tick
     if (!target)
     {
         g_boxReadyAt = 0;
@@ -4541,6 +4592,7 @@ struct GuardApi
     void* blockMinutes = nullptr;  // int   m_blockDurationMinutes
     void* queue = nullptr;         // Queue<long> of request times (obfuscated name)
     void* blockUntil = nullptr;    // long, 0 = not blocked (obfuscated name)
+    void* instance = nullptr;      // static field on the ob<StageBoxRequestAbuseGuard> base
     bool  missing = false;         // class or fields not found on this build
 };
 static GuardApi g_guard;
@@ -4585,12 +4637,28 @@ static bool ResolveGuardApi()
         g_guard.missing = true;
         return false;
     }
+    // The guard is an ob<T> singleton, and ob<T> keeps the live instance in a static field
+    // of type T (obfuscated name). Reading it is free, where FindObjectsOfType walks the scene.
+    // The getter is not called: it can create the object when there is none.
+    void* parent = il2cpp_class_get_parent ? il2cpp_class_get_parent(g_guard.klass) : nullptr;
+    iter = nullptr;
+    while (parent && (field = il2cpp_class_get_fields(parent, &iter)) != nullptr)
+    {
+        if (!(il2cpp_field_get_flags(field) & 0x0010)) continue;   // statics only
+        char* tn = il2cpp_type_get_name(il2cpp_field_get_type(field));
+        if (!tn) continue;
+        if (strcmp(tn, "TaskbarHero.StageBoxRequestAbuseGuard") == 0) g_guard.instance = field;
+        if (il2cpp_free) il2cpp_free(tn);
+    }
     g_guard.typeObject = il2cpp_type_get_object(il2cpp_class_get_type(g_guard.klass));
     return g_guard.typeObject != nullptr;
 }
 
-// Main thread only. Found again on every read rather than cached: the object belongs to a
-// scene and a stale pointer after a scene change would read freed memory.
+// Main thread only. The object belongs to a scene, so it is looked up again every 30 s; the
+// GC handle keeps the old one readable in between, even across a scene change.
+static SceneQuery g_guardQuery;
+static int32_t    g_guardSceneCount = -2;      // -2 never searched, -1 search failed
+
 static bool ReadGuard(GuardState* out)
 {
     *out = {};
@@ -4598,11 +4666,16 @@ static bool ReadGuard(GuardState* out)
     if (!g_box.findObjects) ResolveBoxApi();
     if (!g_box.findObjects) return false;
 
-    void* args[1] = { g_guard.typeObject };
-    void* exc = nullptr;
-    void* arr = il2cpp_runtime_invoke(g_box.findObjects, nullptr, args, &exc);
-    if (exc || !arr || il2cpp_array_length(arr) == 0) return false;
-    void* guard = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+    void* guard = nullptr;
+    if (g_guard.instance && il2cpp_field_static_get_value)
+        il2cpp_field_static_get_value(g_guard.instance, &guard);
+    if (!guard)
+    {
+        void* arr = FindObjectsCached(g_guardQuery, g_guard.typeObject, 30000);
+        g_guardSceneCount = arr ? static_cast<int32_t>(il2cpp_array_length(arr)) : -1;
+        if (g_guardSceneCount <= 0) return false;
+        guard = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20);
+    }
     if (!guard) return false;
 
     il2cpp_field_get_value(guard, g_guard.interval, &out->intervalSec);
@@ -4863,7 +4936,9 @@ static size_t AppendDropStats(char* text, size_t cap, size_t pos)
     if (g_guard.missing)
         pos = ScanAppend(text, cap, pos, "box request guard: not found on this build\r\n");
     else if (!g_guardLast.found)
-        pos = ScanAppend(text, cap, pos, "box request guard: not read yet (no stage loaded?)\r\n");
+        pos = ScanAppend(text, cap, pos,
+            "box request guard: not read yet (singleton field %s, scene search found %d)\r\n",
+            g_guard.instance ? "empty" : "not found", g_guardSceneCount);
     else
     {
         ULONGLONG left = 0;
